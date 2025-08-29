@@ -1,0 +1,457 @@
+import os
+import cv2
+import numpy as np
+import tensorflow as tf
+
+MODEL_DIR = r"D:\project\models\saved_model"
+INPUT_DIR = r"D:\project\data\frames"
+OUTPUT_DIR = r"D:\project\outputs"
+
+print("Loading model...")
+detect_fn = tf.saved_model.load(MODEL_DIR)
+print("Model loaded successfully!")
+
+CONFIDENCE_THRESHOLD = 0.3
+DART_CLASS_ID = 1  # ✅ confirmed from your logs
+
+
+def estimate_board_center(image_bgr):
+    """Estimate dartboard center using Hough circle on the bull area.
+    Falls back to the image center if detection fails.
+    """
+    h, w = image_bgr.shape[:2]
+    max_side = max(h, w)
+    scale = 640.0 / max_side if max_side > 640 else 1.0
+    if scale != 1.0:
+        small = cv2.resize(image_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    else:
+        small = image_bgr
+
+    sh, sw = small.shape[:2]
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    gray = cv2.medianBlur(gray, 3)
+
+    min_r = int(0.03 * min(sh, sw))
+    max_r = int(0.25 * min(sh, sw))
+    try:
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=1.1,
+            minDist=min(sh, sw) // 4,
+            param1=110,
+            param2=30,
+            minRadius=min_r,
+            maxRadius=max_r,
+        )
+    except cv2.error:
+        circles = None
+
+    if circles is not None:
+        circles = np.uint16(np.around(circles))
+        x, y, _r = circles[0][0]
+        return int(x / scale), int(y / scale)
+
+    return w // 2, h // 2
+
+
+def find_lowest_point(x1, y1, x2, y2):
+    """Return the bottom-center of the bounding box (approx dart tip)."""
+    tip_x = (x1 + x2) // 2
+    tip_y = y2
+    return tip_x, tip_y
+
+
+def find_dart_tip(x1, y1, x2, y2, image_bgr, board_center_xy):
+    """
+    Robustly estimate the steel tip location inside the detected dart box.
+
+    Strategy (with cascading fallbacks):
+    1) Edge + Hough lines aligned toward the dartboard center → choose the
+       endpoint closest to the board center.
+    2) PCA on edge points to approximate the shaft axis → choose the closer
+       endpoint to the board center.
+    3) Ray cast from ROI center toward the board center to the first strong
+       edge hit.
+    4) Final fallback: pick the pixel inside the box closest to the board
+       center.
+    """
+
+    h, w = image_bgr.shape[:2]
+    # Start with the detector box, then extend slightly toward the board center
+    x1c = max(0, x1)
+    y1c = max(0, y1)
+    x2c = min(w, x2)
+    y2c = min(h, y2)
+    # Small directional padding to ensure the steel tip is inside the ROI even if it pokes out
+    pad = 10
+    box_cx = (x1 + x2) // 2
+    box_cy = (y1 + y2) // 2
+    if board_center_xy[0] > box_cx:
+        x2c = min(w, x2c + pad)
+    else:
+        x1c = max(0, x1c - pad)
+    if board_center_xy[1] > box_cy:
+        y2c = min(h, y2c + pad)
+    else:
+        y1c = max(0, y1c - pad)
+
+    roi = image_bgr[y1c:y2c, x1c:x2c]
+    if roi.size == 0:
+        return (x1 + x2) // 2, y2
+
+    roi_h, roi_w = roi.shape[:2]
+    roi_cx = roi_w // 2
+    roi_cy = roi_h // 2
+    # Unpack board center once for the function and reuse
+    board_cx, board_cy = board_center_xy
+
+    # Enhance contrast and compute edges
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    try:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+    except cv2.error:
+        pass
+    gray = cv2.bilateralFilter(gray, 5, 50, 50)
+    edges_raw = cv2.Canny(gray, 60, 160)
+
+    # Build a shaft-likelihood mask: combine HSV and LAB constraints to target gray/metal shaft
+    # HSV: low saturation, mid luminance (avoid white flights and very dark background)
+    hsv_mask = cv2.inRange(hsv, np.array([0, 0, 25]), np.array([180, 85, 225]))
+    # LAB: a and b near 128 for neutral colors, and L not extremely high (avoid white flights)
+    L, A, B = cv2.split(lab)
+    a_neutral = cv2.inRange(A, 120, 136)
+    b_neutral = cv2.inRange(B, 112, 142)
+    l_ok = cv2.inRange(L, 35, 210)
+    lab_mask = cv2.bitwise_and(a_neutral, b_neutral)
+    lab_mask = cv2.bitwise_and(lab_mask, l_ok)
+    shaft_mask = cv2.bitwise_and(hsv_mask, lab_mask)
+    # Remove small blobs and widen slightly
+    kernel = np.ones((3, 3), np.uint8)
+    shaft_mask = cv2.morphologyEx(shaft_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    shaft_mask = cv2.morphologyEx(shaft_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # Keep only edges that lie on the shaft-like region
+    edges = cv2.bitwise_and(edges_raw, shaft_mask)
+
+    # Precompute gradient magnitude for later tip refinement
+    sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = cv2.magnitude(sobelx, sobely)
+
+    # -1) Contour-based tip from shaft mask: choose the elongated contour point
+    #     closest to the board center.
+    contours, _ = cv2.findContours(shaft_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        best_tip = None
+        best_score = -1.0
+        for cnt in contours:
+            if cv2.contourArea(cnt) < 60:
+                continue
+            rect = cv2.minAreaRect(cnt)
+            (cxr, cyr), (wr, hr), _ = rect
+            if min(wr, hr) <= 1:
+                continue
+            aspect = (max(wr, hr) + 1e-3) / (min(wr, hr) + 1e-3)
+            # Prefer long, thin regions
+            score = cv2.contourArea(cnt) * aspect
+            if score > best_score:
+                # candidate tip = mask point nearest to board center
+                pts = cnt.reshape(-1, 2)
+                pts_g = np.column_stack((pts[:, 0] + x1c, pts[:, 1] + y1c))
+                dists = (pts_g[:, 0] - board_cx) ** 2 + (pts_g[:, 1] - board_cy) ** 2
+                idx = int(np.argmin(dists))
+                best_tip = (int(pts_g[idx, 0]), int(pts_g[idx, 1]))
+                best_score = score
+        if best_tip is not None:
+            return best_tip[0], best_tip[1]
+
+    # 0) Prefer a geometric ray-cast along shaft toward board center on the
+    #    shaft-like mask to find the last in-mask pixel (tip end)
+    bcx_roi = float(np.clip(board_cx - x1c, 0, roi_w - 1))
+    bcy_roi = float(np.clip(board_cy - y1c, 0, roi_h - 1))
+
+    # If we have a reasonable shaft region, use its centroid as start
+    if np.count_nonzero(shaft_mask) > max(50, int(0.0025 * roi_w * roi_h)):
+        m = cv2.moments(shaft_mask, binaryImage=True)
+        if m["m00"] > 1.0:
+            cx_s = float(m["m10"] / m["m00"])
+            cy_s = float(m["m01"] / m["m00"])
+
+            dir_vec_local = np.array([bcx_roi - cx_s, bcy_roi - cy_s], dtype=np.float32)
+            dir_len = float(np.linalg.norm(dir_vec_local))
+            if dir_len > 1.0:
+                dir_unit_local = dir_vec_local / dir_len
+                # perpendicular vector for multi-ray sampling
+                perp = np.array([-dir_unit_local[1], dir_unit_local[0]], dtype=np.float32)
+                offsets = [
+                    0.0,
+                    1.5,
+                    -1.5,
+                    3.0,
+                    -3.0,
+                ]
+                best_rc = None
+                best_rc_dist = 1e12
+                tmax = int(1.4 * max(roi_w, roi_h))
+                for off in offsets:
+                    start = np.array([cx_s, cy_s], dtype=np.float32) + perp * off
+                    last_in = None
+                    run = 0
+                    for t in range(0, tmax):
+                        pos = start + dir_unit_local * t
+                        ix = int(round(pos[0]))
+                        iy = int(round(pos[1]))
+                        if ix < 0 or iy < 0 or ix >= roi_w or iy >= roi_h:
+                            break
+                        if shaft_mask[iy, ix] > 0:
+                            last_in = (ix, iy)
+                            run += 1
+                        elif last_in is not None:
+                            # left the shaft region: last_in is candidate tip
+                            gx = x1c + last_in[0]
+                            gy = y1c + last_in[1]
+                            d = (gx - board_cx) ** 2 + (gy - board_cy) ** 2
+                            # require a minimum run inside the shaft to avoid noise
+                            if run >= max(6, int(0.06 * max(roi_w, roi_h))):
+                                if d < best_rc_dist:
+                                    best_rc_dist = d
+                                    best_rc = (gx, gy)
+                            break
+                    # If we never left the region, ignore this ray
+                if best_rc is not None:
+                    # Refine by following the axis beyond the shaft and picking the steepest drop in intensity
+                    start_local = np.array([best_rc[0] - x1c, best_rc[1] - y1c], dtype=np.float32)
+                    fwd = int(0.18 * max(roi_w, roi_h))
+                    fwd = max(12, min(fwd, 42))
+
+                    # Sample gray values along the axis using bilinear sampling
+                    def bilinear(img, x, y):
+                        x0 = int(np.floor(x)); y0 = int(np.floor(y))
+                        x1i = min(x0 + 1, img.shape[1] - 1)
+                        y1i = min(y0 + 1, img.shape[0] - 1)
+                        dx = float(x - x0); dy = float(y - y0)
+                        v00 = float(img[y0, x0]); v10 = float(img[y0, x1i])
+                        v01 = float(img[y1i, x0]); v11 = float(img[y1i, x1i])
+                        v0 = v00 * (1 - dx) + v10 * dx
+                        v1 = v01 * (1 - dx) + v11 * dx
+                        return v0 * (1 - dy) + v1 * dy
+
+                    step = 1.0
+                    values = []
+                    coords = []
+                    for dt in np.arange(1.0, fwd + 0.01, step):
+                        px = start_local[0] + dir_unit_local[0] * dt
+                        py = start_local[1] + dir_unit_local[1] * dt
+                        if px < 1 or py < 1 or px >= roi_w - 2 or py >= roi_h - 2:
+                            break
+                        # Skip while still in the shaft mask
+                        if shaft_mask[int(round(py)), int(round(px))] > 0:
+                            continue
+                        coords.append((px, py))
+                        values.append(bilinear(gray, px, py))
+
+                    if len(values) >= 3:
+                        # Smooth lightly and take derivative
+                        v = np.array(values, dtype=np.float32)
+                        v = cv2.GaussianBlur(v.reshape(1, -1), (1, 0), 0.8).ravel()
+                        dv = v[1:] - v[:-1]
+                        # Prefer the FIRST sufficiently strong drop after leaving the mask
+                        tau = max(6.0, 0.06 * (v.max() - v.min() + 1e-3))
+                        idx = None
+                        for i in range(len(dv)):
+                            if dv[i] < -tau:
+                                idx = i
+                                break
+                        if idx is None:
+                            idx = int(np.argmin(dv))
+                        tip_local = coords[min(idx + 1, len(coords) - 1)]
+                        return x1c + int(round(tip_local[0])), y1c + int(round(tip_local[1]))
+
+                    # Fallback to previous best
+                    return best_rc[0], best_rc[1]
+
+    # Direction from ROI center to board center (normalized)
+    dir_vec = np.array([
+        float(board_cx - (x1c + roi_cx)),
+        float(board_cy - (y1c + roi_cy)),
+    ], dtype=np.float32)
+    dir_norm = np.linalg.norm(dir_vec) + 1e-6
+    dir_unit = dir_vec / dir_norm
+
+    # 1) Hough lines aligned toward the board center (use unmasked edges to avoid losing shaft info)
+    min_len = max(10, int(0.22 * max(roi_w, roi_h)))
+    lines = cv2.HoughLinesP(
+        edges_raw, 1, np.pi / 180.0, threshold=25, minLineLength=min_len, maxLineGap=12
+    )
+
+    best_pt = None
+    best_dist = 1e12
+    if lines is not None:
+        for ln in lines:
+            x3, y3, x4, y4 = ln[0]
+            v = np.array([float(x4 - x3), float(y4 - y3)], dtype=np.float32)
+            v_len = np.linalg.norm(v)
+            if v_len < 1.0:
+                continue
+            cos_aln = abs(np.dot(v / v_len, dir_unit))
+            if cos_aln < 0.65:  # require reasonable alignment with board direction
+                continue
+
+            # Endpoints in global coordinates
+            p1g = (x1c + x3, y1c + y3)
+            p2g = (x1c + x4, y1c + y4)
+            d1 = (p1g[0] - board_cx) ** 2 + (p1g[1] - board_cy) ** 2
+            d2 = (p2g[0] - board_cx) ** 2 + (p2g[1] - board_cy) ** 2
+            if d1 < best_dist:
+                best_dist = d1
+                best_pt = p1g
+            if d2 < best_dist:
+                best_dist = d2
+                best_pt = p2g
+
+    if best_pt is not None:
+        # Refine along ray to board center using gray derivative, starting from the chosen endpoint
+        start_local = np.array([best_pt[0] - x1c, best_pt[1] - y1c], dtype=np.float32)
+        dir_vec_local = np.array([bcx_roi - start_local[0], bcy_roi - start_local[1]], dtype=np.float32)
+        dlen = float(np.linalg.norm(dir_vec_local))
+        if dlen > 1.0:
+            dir_unit_local = dir_vec_local / dlen
+            def bilinear(img, x, y):
+                x0 = int(np.floor(x)); y0 = int(np.floor(y))
+                x1i = min(x0 + 1, img.shape[1] - 1)
+                y1i = min(y0 + 1, img.shape[0] - 1)
+                dx = float(x - x0); dy = float(y - y0)
+                v00 = float(img[y0, x0]); v10 = float(img[y0, x1i])
+                v01 = float(img[y1i, x0]); v11 = float(img[y1i, x1i])
+                v0 = v00 * (1 - dx) + v10 * dx
+                v1 = v01 * (1 - dx) + v11 * dx
+                return v0 * (1 - dy) + v1 * dy
+            values = []
+            coords = []
+            fwd = max(12, int(0.18 * max(roi_w, roi_h)))
+            for dt in np.arange(1.0, fwd + 0.01, 1.0):
+                px = start_local[0] + dir_unit_local[0] * dt
+                py = start_local[1] + dir_unit_local[1] * dt
+                if px < 1 or py < 1 or px >= roi_w - 2 or py >= roi_h - 2:
+                    break
+                coords.append((px, py))
+                values.append(bilinear(gray, px, py))
+            if len(values) >= 3:
+                v = np.array(values, dtype=np.float32)
+                v = cv2.GaussianBlur(v.reshape(1, -1), (1, 0), 0.8).ravel()
+                dv = v[1:] - v[:-1]
+                k = int(np.argmin(dv))
+                tip_local = coords[min(k + 1, len(coords) - 1)]
+                return x1c + int(round(tip_local[0])), y1c + int(round(tip_local[1]))
+        return int(best_pt[0]), int(best_pt[1])
+
+    # 2) PCA on edge points from shaft-likelihood only
+    ys, xs = np.nonzero(edges)
+    if xs.size >= 10:
+        points = np.column_stack((xs, ys)).astype(np.float32)
+        try:
+            mean, eigenvectors = cv2.PCACompute(points, mean=None, maxComponents=1)
+            axis = eigenvectors[0]
+            # Project and get extremes
+            centered = points - mean
+            projections = centered @ axis.reshape(-1, 1)
+            min_idx = int(np.argmin(projections))
+            max_idx = int(np.argmax(projections))
+            e1 = (int(points[min_idx, 0]), int(points[min_idx, 1]))
+            e2 = (int(points[max_idx, 0]), int(points[max_idx, 1]))
+            g1 = (x1c + e1[0], y1c + e1[1])
+            g2 = (x1c + e2[0], y1c + e2[1])
+            d1 = (g1[0] - board_cx) ** 2 + (g1[1] - board_cy) ** 2
+            d2 = (g2[0] - board_cx) ** 2 + (g2[1] - board_cy) ** 2
+            return (g1 if d1 < d2 else g2)
+        except cv2.error:
+            pass
+
+    # 3) Ray cast from ROI center towards board center to first edge hit
+    max_ray = int(1.2 * max(roi_w, roi_h))
+    for t in range(5, max_ray):  # start a bit away from the center
+        rx = int(roi_cx + dir_unit[0] * t)
+        ry = int(roi_cy + dir_unit[1] * t)
+        if rx < 1 or ry < 1 or rx >= roi_w - 1 or ry >= roi_h - 1:
+            break
+        window = edges[ry - 1 : ry + 2, rx - 1 : rx + 2]
+        if np.count_nonzero(window) >= 2:
+            return x1c + rx, y1c + ry
+
+    # 4) Final fallback: choose the pixel in the box closest to board center
+    tip_x = int(np.clip(board_cx, x1c, x2c - 1))
+    tip_y = int(np.clip(board_cy, y1c, y2c - 1))
+    return tip_x, tip_y
+
+
+def run_detector(image_bgr):
+    """Run detector on an image and return dart bounding boxes only."""
+    board_center_xy = estimate_board_center(image_bgr)
+    input_tensor = tf.convert_to_tensor(image_bgr)[tf.newaxis, ...]
+    input_tensor = tf.cast(input_tensor, tf.uint8)
+    outputs = detect_fn(input_tensor)
+
+    boxes = outputs["detection_boxes"][0].numpy()
+    scores = outputs["detection_scores"][0].numpy()
+    classes = outputs["detection_classes"][0].numpy().astype(int)
+
+    h, w, _ = image_bgr.shape
+    results = []
+
+    for box, score, cls in zip(boxes, scores, classes):
+        if score < CONFIDENCE_THRESHOLD:
+            continue
+        if cls != DART_CLASS_ID:
+            continue  # skip dartboard
+
+        ymin, xmin, ymax, xmax = box
+        x1, y1, x2, y2 = int(xmin * w), int(ymin * h), int(xmax * w), int(ymax * h)
+
+        # ✅ Find tip with fallback
+        tip_x, tip_y = find_dart_tip(x1, y1, x2, y2, image_bgr, board_center_xy)
+        results.append((x1, y1, x2, y2, score, tip_x, tip_y))
+
+    results.sort(key=lambda x: x[4], reverse=True)
+    return results
+
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    for fname in os.listdir(INPUT_DIR):
+        if not fname.lower().endswith((".jpg", ".png", ".jpeg")):
+            continue
+
+        path = os.path.join(INPUT_DIR, fname)
+        image_bgr = cv2.imread(path)
+
+        print(f"\nProcessing {fname}...")
+        detections = run_detector(image_bgr)
+        print(f"Found {len(detections)} darts, processing in confidence order...")
+
+        for i, (x1, y1, x2, y2, score, tip_x, tip_y) in enumerate(detections):
+            dart_number = i + 1
+            cv2.rectangle(image_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(image_bgr, f"dart {dart_number} ({score:.2f})",
+                        (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 0), 2)
+
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            cv2.circle(image_bgr, (cx, cy), 5, (255, 0, 0), -1)
+            cv2.circle(image_bgr, (tip_x, tip_y), 8, (0, 0, 255), -1)
+            cv2.putText(image_bgr, f"tip {dart_number}",
+                        (tip_x + 10, tip_y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 2)
+            cv2.line(image_bgr, (cx, cy), (tip_x, tip_y), (255, 255, 0), 2)
+
+        out_path = os.path.join(OUTPUT_DIR, fname)
+        cv2.imwrite(out_path, image_bgr)
+        print(f"✅ Processed {fname}, found {len(detections)} darts")
+
+
+if __name__ == "__main__":
+    main()
