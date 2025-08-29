@@ -24,8 +24,8 @@ COPY . .
 # Create models directory (you'll need to upload your model files)
 RUN mkdir -p models/saved_model
 
-# Expose port
+# Expose port (will be overridden by Render)
 EXPOSE 8000
 
-# Run the app
-CMD ["uvicorn", "bullseye_api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the app with proper port binding for Render
+CMD ["sh", "-c", "uvicorn bullseye_api:app --host 0.0.0.0 --port ${PORT:-8000}"]

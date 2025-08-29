@@ -4,7 +4,7 @@ services:
     env: docker
     plan: free
     buildCommand: docker build -t bullseye-api .
-    startCommand: docker run -p $PORT:8000 bullseye-api
+    startCommand: docker run -p $PORT:8000 -e PORT=$PORT bullseye-api
     envVars:
       - key: PYTHON_VERSION
         value: 3.9
