@@ -14,7 +14,7 @@ from pydantic import BaseModel
 # ===============================
 # --- Load TensorFlow Dart Model
 # ===============================
-MODEL_DIR = "D:\project\models\saved_model"
+MODEL_DIR = "models/saved_model"
 model = tf.saved_model.load(MODEL_DIR)
 infer = model.signatures["serving_default"]
 
