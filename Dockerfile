@@ -24,6 +24,11 @@ COPY . .
 # Create models directory (you'll need to upload your model files)
 RUN mkdir -p models/saved_model
 
+# Set memory optimization environment variables
+ENV TF_CPP_MIN_LOG_LEVEL=2
+ENV TF_FORCE_GPU_ALLOW_GROWTH=false
+ENV TF_MEMORY_ALLOCATION=0.8
+
 # Expose port (will be overridden by Render)
 EXPOSE 8000
 
