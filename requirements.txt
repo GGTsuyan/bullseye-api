@@ -1,9 +1,11 @@
-fastapi==0.95.2
-uvicorn[standard]==0.22.0
-python-multipart==0.0.6
+# Python Requirements for Bullseye API
+# This is a Python application, not a Docker container
+fastapi
+uvicorn[standard]
+python-multipart
 tensorflow-cpu<2.13.0
-opencv-python-headless==4.7.0.72
-numpy==1.24.3
-psutil==5.9.5
-Pillow==9.5.0
+opencv-python-headless
+numpy
+psutil
+Pillow
 typing-extensions<4.6.0
