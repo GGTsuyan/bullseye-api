@@ -1,8 +1,9 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
 python-multipart==0.0.6
-tensorflow-cpu==2.13.0
-opencv-python-headless==4.8.1.78
+tensorflow-cpu==2.12.0
+opencv-python-headless==4.7.0.72
 numpy==1.24.3
 psutil==5.9.5
-Pillow==10.0.1
+Pillow==9.5.0
+typing-extensions==4.5.0
