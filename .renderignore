@@ -1,0 +1,9 @@
+# Explicitly ignore any Docker-related files
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.yaml
+Dockerfile.*
+
+# Only use Python environment
+# This is a Python application, not a Docker container
