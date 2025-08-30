@@ -6,6 +6,7 @@ import numpy as np
 import tensorflow as tf
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -576,6 +577,15 @@ def process_dartboard(image):
 # --- FastAPI App
 # ===============================
 app = FastAPI()
+
+# Add CORS middleware to allow Flutter app to connect
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 @app.get("/")
 def root():
