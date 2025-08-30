@@ -1,5 +1,6 @@
 # Python Requirements for Bullseye API
 # This is a Python application, not a Docker container
+# Python version: 3.9
 fastapi
 uvicorn[standard]
 python-multipart
