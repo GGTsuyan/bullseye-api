@@ -577,17 +577,6 @@ def process_dartboard(image):
 # ===============================
 app = FastAPI()
 
-@app.get("/")
-def root():
-    return {
-        "status": "Bullseye API is running",
-        "endpoints": ["/init-board (POST)", "/detect-dart (POST)", "/reset-turn (POST)", "/debug-visual (GET)"]
-    }
-
-@app.get("/healthz")
-def healthz():
-    return {"ok": True}
-
 @app.post("/init-board")
 async def init_board(file: UploadFile = File(...)):
     # Load TensorFlow model if not already loaded
@@ -806,5 +795,4 @@ async def debug_visual():
 # --- Run
 # ===============================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
