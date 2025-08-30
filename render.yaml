@@ -1,10 +1,10 @@
 services:
   - type: web
     name: bullseye-api
-    env: docker
+    env: python
     plan: free
-    buildCommand: docker build -t bullseye-api .
-    startCommand: docker run -p $PORT:8000 -e PORT=$PORT bullseye-api
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn bullseye_api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.9
@@ -15,7 +15,7 @@ services:
       - key: TF_FORCE_GPU_ALLOW_GROWTH
         value: false
       - key: TF_MEMORY_ALLOCATION
-        value: 0.5
+        value: 0.3
       - key: TF_CPP_VMODULE
         value: "tensorflow=0"
       - key: OMP_NUM_THREADS
