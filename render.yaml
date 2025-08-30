@@ -4,7 +4,7 @@ services:
     env: docker
     plan: free
     buildCommand: docker build -t bullseye-api .
-    startCommand: docker run -p $PORT:$PORT -e PORT=$PORT -e TF_CPP_MIN_LOG_LEVEL=2 -e TF_FORCE_GPU_ALLOW_GROWTH=false -e TF_MEMORY_ALLOCATION=0.8 bullseye-api
+    startCommand: uvicorn bullseye_api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.9
@@ -15,4 +15,8 @@ services:
       - key: TF_FORCE_GPU_ALLOW_GROWTH
         value: false
       - key: TF_MEMORY_ALLOCATION
-        value: 0.8
+        value: 0.5
+      - key: TF_CPP_VMODULE
+        value: "tensorflow=0"
+      - key: OMP_NUM_THREADS
+        value: 1
