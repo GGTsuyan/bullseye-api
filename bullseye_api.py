@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-# import globals  # This module doesn't exist
+import globals
 
 # ===============================
 # --- Load TensorFlow Dart Model
