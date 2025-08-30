@@ -3,6 +3,7 @@ import math
 import os
 import cv2
 import numpy as np
+import tensorflow as tf
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -11,10 +12,41 @@ from pydantic import BaseModel
 import globals
 
 # ===============================
-# --- Basic Dart Detection (No ML)
+# --- Load TensorFlow Dart Model (Memory Optimized)
 # ===============================
+MODEL_DIR = "models/saved_model"
+
+# Memory optimization: Load model only when needed
+model = None
+infer = None
+
+def load_model():
+    """Load TensorFlow model with memory optimization."""
+    global model, infer
+    if model is None:
+        # Set TensorFlow memory growth to prevent OOM
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if gpus:
+            try:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+            except RuntimeError as e:
+                print(f"GPU memory growth setting failed: {e}")
+        
+        # Load model
+        model = tf.saved_model.load(MODEL_DIR)
+        infer = model.signatures["serving_default"]
+        print("TensorFlow model loaded successfully")
+    
+    return model, infer
+
 CONFIDENCE_THRESHOLD = 0.3
+DART_CLASS_ID = 1
 MAX_DARTS = 1
+
+LABEL_MAP = {1: "dart", 2: "dartboard"}
+
+
 
 # ===============================
 # --- Globals (board + darts)
@@ -53,46 +85,35 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
     return tip_img_coord
 
 # ===============================
-# --- Basic Dart Detector (OpenCV-based)
+# --- Dart Detector Wrapper
 # ===============================
 def run_detector(image_bgr):
-    """
-    Basic dart detection using OpenCV instead of ML models.
-    This is a simplified version for demonstration.
-    """
-    # Convert to grayscale for processing
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    
-    # Simple edge detection
-    edges = cv2.Canny(gray, 50, 150)
-    
-    # Find contours
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+    h_orig, w_orig, _ = image_bgr.shape
+    image_resized = cv2.resize(image_bgr, (640, 640))
+    input_tensor = tf.convert_to_tensor(image_resized)[tf.newaxis, ...]
+    input_tensor = tf.cast(input_tensor, tf.uint8)
+
+    outputs = infer(input_tensor)
+    boxes = outputs["detection_boxes"][0].numpy()
+    scores = outputs["detection_scores"][0].numpy()
+    classes = outputs["detection_classes"][0].numpy().astype(int)
+
     results = []
-    for contour in contours:
-        # Filter by area (darts should be reasonably sized)
-        area = cv2.contourArea(contour)
-        if area < 100 or area > 10000:  # Adjust these thresholds as needed
-            continue
-            
-        # Get bounding box
-        x, y, w, h = cv2.boundingRect(contour)
-        
-        # Simple aspect ratio check for dart-like shapes
-        aspect_ratio = w / h if h > 0 else 0
-        if 0.1 < aspect_ratio < 10:  # Darts can be various orientations
-            # Estimate dart tip (center of bounding box)
-            tip_x, tip_y = x + w//2, y + h//2
-            
-            # Add to results with a default confidence
-            results.append((x, y, x + w, y + h, 0.8, tip_x, tip_y))
-    
-    # Sort by confidence and limit results
+    for box, score, cls in zip(boxes, scores, classes):
+        if score < CONFIDENCE_THRESHOLD: continue
+        if cls != DART_CLASS_ID: continue
+
+        ymin, xmin, ymax, xmax = box
+        x1, y1 = int(xmin * w_orig), int(ymin * h_orig)
+        x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
+
+        tip_x, tip_y = find_dart_tip(x1, y1, x2, y2, image_bgr)
+        results.append((x1, y1, x2, y2, score, tip_x, tip_y))
+
     results.sort(key=lambda x: x[4], reverse=True)
     if MAX_DARTS == 1 and results:
         return [results[0]]
-    return results[:MAX_DARTS]
+    return results
 
 def get_red_mask(hsv):
     """Binary mask for red regions (covers hue wrap-around)."""
@@ -187,51 +208,41 @@ def warp_to_scoring_region(image, size=640):
     return warped, box, ellipse, M
 
 # -------------------------------
-# OpenCV Dartboard Detection (coarse crop)
+# TensorFlow Dartboard Detection (coarse crop)
 # -------------------------------
-def detect_dartboard_opencv(image, width=640, height=640):
-    """
-    Basic dartboard detection using OpenCV instead of ML models.
-    This is a simplified version for demonstration.
-    """
+def detect_dartboard_tf(image, width=640, height=640):
     try:
-        # Convert to HSV for color-based detection
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        
-        # Create mask for dartboard colors (red + green rings)
-        ring_mask = get_ring_mask(hsv)
-        
-        # Apply morphological operations to clean up the mask
-        ring_mask = cv2.morphologyEx(ring_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-        ring_mask = cv2.morphologyEx(ring_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        
-        # Find contours
-        contours, _ = cv2.findContours(ring_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return None, None, None
-            
-        # Find the largest contour (likely the dartboard)
-        largest = max(contours, key=cv2.contourArea)
-        
-        # Get bounding box
-        x, y, w, h = cv2.boundingRect(largest)
-        
-        # Expand bounding box by 10% to be safe
-        pad_w, pad_h = int(0.1 * w), int(0.1 * h)
-        x, y = max(0, x - pad_w), max(0, y - pad_h)
-        w, h = min(image.shape[1] - x, w + 2 * pad_w), min(image.shape[0] - y, h + 2 * pad_h)
-        
-        # Crop and resize
-        crop = image[y:y + h, x:x + w]
-        if crop.size == 0:
-            return None, None, None
-            
-        warped = cv2.resize(crop, (width, height))
-        return warped, (x, y, x + w, y + h), 0.7  # pseudo-confidence for OpenCV method
-        
+        input_tensor = np.expand_dims(image, axis=0).astype(np.uint8)
+        preds = infer(tf.constant(input_tensor))
+
+        boxes = preds["detection_boxes"][0].numpy()
+        scores = preds["detection_scores"][0].numpy()
+        classes = preds["detection_classes"][0].numpy().astype(int)
+
+        h, w = image.shape[:2]
+        for i, score in enumerate(scores):
+            if score < 0.5:
+                continue
+
+            class_id = classes[i]
+            label = LABEL_MAP.get(class_id, "unknown")
+
+            ymin, xmin, ymax, xmax = boxes[i]
+            x1, y1, x2, y2 = (
+                int(xmin * w), int(ymin * h), int(xmax * w), int(ymax * h)
+            )
+
+            if label == "dartboard":
+                crop = image[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                crop = cv2.resize(crop, (width, height))
+                return crop, (x1, y1, x2, y2), float(score)
+
+        return None, None, None
+
     except Exception as e:
-        print("OpenCV Detection error:", e)
+        print("TF Detection error:", e)
         return None, None, None
     
 
@@ -510,8 +521,8 @@ def make_color_masks(warped_img):
 
     return mask_red, mask_green
 def process_dartboard(image):
-    coarse_crop, coarse_box, conf = detect_dartboard_opencv(image)
-    method = "opencv"
+    coarse_crop, coarse_box, conf = detect_dartboard_tf(image)
+    method = "tf"
     if coarse_crop is None:
         coarse_crop, coarse_box, conf = detect_dartboard_hsv(image)
         method = "hsv_bbox" if coarse_crop is not None else None
@@ -568,6 +579,12 @@ app = FastAPI()
 
 @app.post("/init-board")
 async def init_board(file: UploadFile = File(...)):
+    # Load TensorFlow model if not already loaded
+    try:
+        load_model()
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to load model: {str(e)}"}, status_code=500)
+    
     contents = await file.read()
     npimg = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
