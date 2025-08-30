@@ -11,11 +11,11 @@ applications:
       - key: PORT
         value: 8000
       - key: TF_CPP_MIN_LOG_LEVEL
-        value: 2
+        value: 3
       - key: TF_FORCE_GPU_ALLOW_GROWTH
         value: false
       - key: TF_MEMORY_ALLOCATION
-        value: 0.1
+        value: 0.05
       - key: TF_CPP_VMODULE
         value: "tensorflow=0"
       - key: OMP_NUM_THREADS
@@ -24,3 +24,5 @@ applications:
         value: "1"
       - key: PYTHONDONTWRITEBYTECODE
         value: "1"
+      - key: TF_ENABLE_ONEDNN_OPTS
+        value: "0"
