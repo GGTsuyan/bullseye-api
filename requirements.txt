@@ -1,12 +1,12 @@
 # Python Requirements for Bullseye API
 # This is a Python application, not a Docker container
 # Python version: 3.9
-fastapi
-uvicorn[standard]
-python-multipart
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+python-multipart>=0.0.6
 tensorflow-cpu<2.13.0
-opencv-python-headless
-numpy
-psutil
-Pillow
+opencv-python-headless>=4.7.0
+numpy>=1.24.0
+psutil>=5.9.0
+Pillow>=9.5.0
 typing-extensions<4.6.0
