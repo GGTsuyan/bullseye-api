@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn bullseye_api:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn bullseye_api:app --host 0.0.0.0 --port $PORT --workers 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.9
@@ -15,8 +15,12 @@ services:
       - key: TF_FORCE_GPU_ALLOW_GROWTH
         value: false
       - key: TF_MEMORY_ALLOCATION
-        value: 0.3
+        value: 0.2
       - key: TF_CPP_VMODULE
         value: "tensorflow=0"
       - key: OMP_NUM_THREADS
         value: 1
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
