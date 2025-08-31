@@ -9,14 +9,14 @@ setup(
         "fastapi",
         "uvicorn[standard]",
         "python-multipart",
-        "tensorflow-cpu==2.20.0",
+        "tensorflow-cpu==2.21.0"
         "opencv-python-headless",
-        "numpy==1.26.0",
+        "numpy==2.2.0"
         "psutil",
         "Pillow",
         "typing-extensions<4.6.0",
     ],
-    python_requires=">=3.9,<3.12",
+    python_requires=">=3.9,<3.14",
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
@@ -25,5 +25,6 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
     ],
 )
