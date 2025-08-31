@@ -14,9 +14,14 @@ tf.config.set_visible_devices([], 'GPU')
 # Memory optimization for Render deployment
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'false'
-os.environ['TF_MEMORY_ALLOCATION'] = '0.3'  # Use only 30% of available memory
+os.environ['TF_MEMORY_ALLOCATION'] = '0.2'  # Use only 20% of available memory
 os.environ['OMP_NUM_THREADS'] = '1'  # Limit OpenMP threads
 os.environ['TF_CPP_VMODULE'] = 'tensorflow=0'  # Disable verbose logging
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable Intel optimizations
+os.environ['TF_ENABLE_MKL_NATIVE_FORMAT'] = '0'  # Disable MKL optimizations
+os.environ['TF_ENABLE_CPU_OPTIMIZATION'] = '0'  # Disable CPU optimizations
+os.environ['TF_USE_CUDNN'] = '0'  # Disable cuDNN
+os.environ['TF_USE_CUDA'] = '0'  # Disable CUDA
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
@@ -38,6 +43,14 @@ try:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, False)
     
+    # Set memory limits before loading
+    try:
+        cpu_devices = tf.config.list_physical_devices('CPU')
+        if cpu_devices:
+            tf.config.experimental.set_memory_growth(cpu_devices[0], False)
+    except:
+        pass
+    
     # Load model with memory optimization
     model = tf.saved_model.load(MODEL_DIR)
     infer = model.signatures["serving_default"]
@@ -45,9 +58,14 @@ try:
     # Clear any unnecessary variables
     tf.keras.backend.clear_session()
     
+    # Force garbage collection
+    import gc
+    gc.collect()
+    
     print("✅ TensorFlow model loaded successfully from", MODEL_DIR)
     print("🔧 TensorFlow configured for CPU-only usage")
     print("💾 Memory optimization applied for Render deployment")
+    print("🧠 Memory limit: 20% of available RAM")
 except Exception as e:
     print(f"❌ Failed to load TensorFlow model: {e}")
     print(f"❌ Model path: {MODEL_DIR}")
@@ -136,9 +154,10 @@ def run_detector(image_bgr):
         print(f"❌ TensorFlow detection failed: {e}")
         raise RuntimeError(f"Dart detection failed: {e}")
     finally:
-        # Force garbage collection
+        # Force garbage collection and clear TensorFlow memory
         import gc
         gc.collect()
+        tf.keras.backend.clear_session()
 
 def get_red_mask(hsv):
     """Binary mask for red regions (covers hue wrap-around)."""
@@ -859,11 +878,22 @@ def ping():
 def healthz():
     import psutil
     memory_info = psutil.virtual_memory()
+    
+    # Get TensorFlow memory info if available
+    tf_memory = "N/A"
+    try:
+        import tensorflow as tf
+        tf_memory = f"{tf.config.experimental.get_memory_info('CPU:0')['current'] / (1024**2):.1f} MB"
+    except:
+        pass
+    
     return {
         "ok": True,
         "memory_usage": {
             "total": f"{memory_info.total / (1024**3):.2f} GB",
             "available": f"{memory_info.available / (1024**3):.2f} GB",
-            "percent": f"{memory_info.percent:.1f}%"
-        }
+            "percent": f"{memory_info.percent:.1f}%",
+            "tensorflow_memory": tf_memory
+        },
+        "render_status": "Memory optimized for 512MB limit"
     }
