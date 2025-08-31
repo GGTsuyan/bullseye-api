@@ -11,6 +11,13 @@ import tensorflow as tf
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 tf.config.set_visible_devices([], 'GPU')
 
+# Memory optimization for Render deployment
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'false'
+os.environ['TF_MEMORY_ALLOCATION'] = '0.3'  # Use only 30% of available memory
+os.environ['OMP_NUM_THREADS'] = '1'  # Limit OpenMP threads
+os.environ['TF_CPP_VMODULE'] = 'tensorflow=0'  # Disable verbose logging
+
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -25,10 +32,22 @@ import globals
 MODEL_DIR = "models/saved_model"  # Updated path to your model location
 
 try:
+    # Memory optimization: load model with memory limits
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, False)
+    
+    # Load model with memory optimization
     model = tf.saved_model.load(MODEL_DIR)
     infer = model.signatures["serving_default"]
+    
+    # Clear any unnecessary variables
+    tf.keras.backend.clear_session()
+    
     print("✅ TensorFlow model loaded successfully from", MODEL_DIR)
     print("🔧 TensorFlow configured for CPU-only usage")
+    print("💾 Memory optimization applied for Render deployment")
 except Exception as e:
     print(f"❌ Failed to load TensorFlow model: {e}")
     print(f"❌ Model path: {MODEL_DIR}")
@@ -94,6 +113,9 @@ def run_detector(image_bgr):
         scores = outputs["detection_scores"][0].numpy()
         classes = outputs["detection_classes"][0].numpy().astype(int)
 
+        # Clear input tensor to free memory
+        del input_tensor
+
         results = []
         for box, score, cls in zip(boxes, scores, classes):
             if score < CONFIDENCE_THRESHOLD: continue
@@ -113,6 +135,10 @@ def run_detector(image_bgr):
     except Exception as e:
         print(f"❌ TensorFlow detection failed: {e}")
         raise RuntimeError(f"Dart detection failed: {e}")
+    finally:
+        # Force garbage collection
+        import gc
+        gc.collect()
 
 def get_red_mask(hsv):
     """Binary mask for red regions (covers hue wrap-around)."""
@@ -819,4 +845,13 @@ def root():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True}
+    import psutil
+    memory_info = psutil.virtual_memory()
+    return {
+        "ok": True,
+        "memory_usage": {
+            "total": f"{memory_info.total / (1024**3):.2f} GB",
+            "available": f"{memory_info.available / (1024**3):.2f} GB",
+            "percent": f"{memory_info.percent:.1f}%"
+        }
+    }

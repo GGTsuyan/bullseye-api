@@ -26,6 +26,12 @@ applications:
         value: "1"
       - key: TF_ENABLE_ONEDNN_OPTS
         value: "0"
+      - key: TF_ENABLE_MKL_NATIVE_FORMAT
+        value: "0"
+      - key: TF_ENABLE_CPU_OPTIMIZATION
+        value: "0"
+      - key: TF_ENABLE_ONEDNN_OPTS
+        value: "0"
       - key: PIP_NO_CACHE_DIR
         value: "1"
       - key: PIP_DISABLE_PIP_VERSION_CHECK
