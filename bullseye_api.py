@@ -87,6 +87,10 @@ last_masks_dict = None
 last_bull_info = None
 last_warped_img = None
 last_masks_rg = None
+last_scores_order = None
+last_transform = None
+last_warp_size = None
+last_warped_dart_img = None
 
 dart_history = []   # all darts across match
 turn_darts = []     # darts this turn only
@@ -893,8 +897,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
     detections = run_detector(image)
     if not detections:
         return {
-            "status": "no_board",
-            "message": "No dartboard detected in frame",
+            "status": "no_darts",
+            "message": "No darts detected in frame",
             "darts": [],
             "game_update": None
         }
@@ -928,22 +932,23 @@ async def live_dart_detect(file: UploadFile = File(...)):
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
     
-    # Return game update
-    game_update = {
-        "game_state": {
-            "current_player": 1,  # You can enhance this
-            "remaining_score": 501,  # You can enhance this
-            "players": [{"name": "Player 1", "remaining_score": 501, "legs_won": 0, "sets_won": 0}]
-        },
-        "new_darts": new_darts,
-        "turn_total": sum(d["score"] for d in turn_darts)
-    }
-    
-    return {
-        "status": "success",
-        "darts": new_darts,
-        "game_update": game_update
-    }
+    # Only return darts if we actually detected some
+    if new_darts:
+        return {
+            "status": "success",
+            "darts": new_darts,
+            "message": f"Detected {len(new_darts)} dart(s)",
+            "total_darts": len(dart_history),
+            "turn_darts": len(turn_darts)
+        }
+    else:
+        return {
+            "status": "no_darts",
+            "message": "No new darts detected",
+            "darts": [],
+            "total_darts": len(dart_history),
+            "turn_darts": len(turn_darts)
+        }
 
 class GameStartRequest(BaseModel):
     mode: str = "501"
@@ -1033,6 +1038,42 @@ def root():
             "/end-turn (POST)",
             "/game-state (GET)"
         ]
+    }
+
+@app.get("/debug-board")
+def debug_board():
+    """Debug endpoint to check board initialization status."""
+    return {
+        "board_initialized": last_transform is not None,
+        "scoring_map_ready": last_scoring_map is not None,
+        "transform_matrix": str(last_transform) if last_transform is not None else None,
+        "warp_size": last_warp_size,
+        "dart_history_count": len(dart_history),
+        "turn_darts_count": len(turn_darts),
+        "last_bull_info": last_bull_info
+    }
+
+@app.get("/board-overlay")
+def get_board_overlay():
+    """Get board overlay information for Flutter app visualization."""
+    if last_transform is None or last_scoring_map is None:
+        return JSONResponse({"error": "Board not initialized"}, status_code=400)
+    
+    # Return board boundaries and scoring zones for overlay
+    h, w = last_warp_size
+    bull_center, radius = last_bull_info
+    
+    return {
+        "status": "success",
+        "overlay": {
+            "board_center": [int(bull_center[0]), int(bull_center[1])],
+            "board_radius": int(radius),
+            "board_size": [w, h],
+            "transform_matrix": str(last_transform),
+            "scoring_map_shape": last_scoring_map.shape,
+            "total_darts": len(dart_history),
+            "turn_darts": len(turn_darts)
+        }
     }
 
 @app.get("/ping")
