@@ -105,9 +105,15 @@ current_game: GameState = None
 # --- Dart Tip Finder
 # ===============================
 def find_dart_tip(x1, y1, x2, y2, image, debug=False):
+    """
+    Find the tip of a dart within the bounding box.
+    Returns the tip coordinates or None if no valid tip is detected.
+    """
     roi = image[y1:y2, x1:x2].copy()
     if roi.size == 0:
-        return (x1 + x2) // 2, (y1 + y2) // 2
+        if debug:
+            print(f"⚠️ Empty ROI: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+        return None
 
     roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(roi_gray, 50, 150)
@@ -115,20 +121,31 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=20,
                             minLineLength=max(8, int(0.3 * max(roi.shape))),
                             maxLineGap=10)
+    
     tip_img_coord = None
-    if lines is not None:
+    if lines is not None and len(lines) > 0:
+        # Find the longest line (most likely to be the dart shaft)
         best_line = max(lines[:,0], key=lambda l: np.hypot(l[2]-l[0], l[3]-l[1]))
         x3, y3, x4, y4 = best_line
+        
+        # Choose the tip end (usually the smaller x coordinate for horizontal darts)
         chosen = (x3, y3) if x3 < x4 else (x4, y4)
         tip_img_coord = (chosen[0] + x1, chosen[1] + y1)
-    if tip_img_coord is None:
-        tip_img_coord = (x1, (y1 + y2) // 2)  # fallback
+        
+        if debug:
+            print(f"✅ Dart tip detected: {tip_img_coord} from line {best_line}")
+    else:
+        if debug:
+            print(f"⚠️ No lines detected in ROI for dart tip detection")
+    
+    # 🚀 REMOVED FORCED FALLBACK: Only return detected tip or None
+    # This prevents false positive dart tip detection and improves accuracy
     return tip_img_coord
 
 # ===============================
 # --- Dart Detector Wrapper
 # ===============================
-def run_detector(image_bgr):
+def run_detector(image_bgr, debug=False):
     try:
         h_orig, w_orig, _ = image_bgr.shape
         image_resized = cv2.resize(image_bgr, (640, 640))
@@ -152,8 +169,18 @@ def run_detector(image_bgr):
             x1, y1 = int(xmin * w_orig), int(ymin * h_orig)
             x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
 
-            tip_x, tip_y = find_dart_tip(x1, y1, x2, y2, image_bgr)
-            results.append((x1, y1, x2, y2, score, tip_x, tip_y))
+            tip_coords = find_dart_tip(x1, y1, x2, y2, image_bgr, debug)
+            
+            # 🚀 ENHANCED: Only include darts with valid tip detection
+            if tip_coords is not None:
+                tip_x, tip_y = tip_coords
+                results.append((x1, y1, x2, y2, score, tip_x, tip_y))
+                if debug:
+                    print(f"✅ Valid dart with tip: score={score:.2f}, tip=({tip_x}, {tip_y})")
+            else:
+                # Skip darts without valid tip detection to prevent false positives
+                if debug:
+                    print(f"⚠️ Dart detected but tip not found - skipping: score={score:.2f}")
 
         results.sort(key=lambda x: x[4], reverse=True)
         if MAX_DARTS == 1 and results:
@@ -739,7 +766,7 @@ async def detect_dart(file: UploadFile = File(...)):
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
     # --- Detect darts on the ORIGINAL image ---
-    detections = run_detector(image)
+    detections = run_detector(image, debug=False)  # Can be enabled for debugging
     if not detections:
         return JSONResponse({"error": "No dart detected"}, status_code=404)
 
@@ -814,6 +841,47 @@ async def detect_dart(file: UploadFile = File(...)):
         "visualization": img_b64
     }
 
+
+@app.post("/detect-dart-debug")
+async def detect_dart_debug(file: UploadFile = File(...)):
+    """Debug endpoint for dart detection with detailed logging."""
+    global last_transform, last_warp_size, last_scoring_map
+    
+    if last_transform is None:
+        return JSONResponse({"error": "Board not initialized"}, status_code=400)
+    
+    contents = await file.read()
+    npimg = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    
+    # Run detector with debug enabled
+    detections = run_detector(image, debug=True)
+    
+    if not detections:
+        return {
+            "status": "no_darts",
+            "message": "No darts detected in frame (debug mode)",
+            "darts": [],
+            "debug_info": "No valid dart tips found"
+        }
+    
+    # Process detections with debug info
+    debug_darts = []
+    for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
+        debug_darts.append({
+            "bbox": [int(x1), int(y1), int(x2), int(y2)],
+            "confidence": float(conf),
+            "tip": [int(tip_x), int(tip_y)],
+            "debug_note": "Valid tip detected"
+        })
+    
+    return {
+        "status": "success",
+        "darts": debug_darts,
+        "message": f"Detected {len(debug_darts)} dart(s) with valid tips",
+        "debug_mode": True,
+        "total_detections": len(debug_darts)
+    }
 
 @app.post("/reset-turn")
 async def reset_turn():
@@ -923,7 +991,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
     
     # Detect darts using existing detection logic
-    detections = run_detector(image)
+    detections = run_detector(image, debug=False)  # Can be enabled for debugging
     if not detections:
         return {
             "status": "no_darts",
@@ -1106,6 +1174,7 @@ def root():
         "endpoints": [
             "/init-board (POST)",
             "/detect-dart (POST)", 
+            "/detect-dart-debug (POST)",  # 🆕 Debug endpoint
             "/reset-turn (POST)",
             "/debug-visual (GET)",
             "/healthz (GET)",
