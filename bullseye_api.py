@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import globals
+from game_logic import GameState
 
 # ===============================
 # --- Load TensorFlow Dart Model
@@ -94,6 +95,11 @@ last_warped_dart_img = None
 
 dart_history = []   # all darts across match
 turn_darts = []     # darts this turn only
+
+# ===============================
+# --- Game State Management
+# ===============================
+current_game: GameState = None
 
 # ===============================
 # --- Dart Tip Finder
@@ -720,7 +726,7 @@ async def init_board(file: UploadFile = File(...)):
 
 @app.post("/detect-dart")
 async def detect_dart(file: UploadFile = File(...)):
-    global dart_history, turn_darts
+    global dart_history, turn_darts, current_game
     global last_transform, last_warp_size, last_scoring_map
     global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg
     global last_warped_dart_img
@@ -767,6 +773,23 @@ async def detect_dart(file: UploadFile = File(...)):
         dart_history.append(dart_entry)
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
+        
+        # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic
+        if current_game is not None:
+            # Determine multiplier based on dart position (simplified logic)
+            multiplier = 1  # Default to single
+            if dart_score == 50:  # Bullseye
+                multiplier = 1
+            elif dart_score > 20:  # Triple ring (outer ring)
+                multiplier = 3
+            elif dart_score > 10:  # Double ring (middle ring)
+                multiplier = 2
+            else:  # Single ring (inner ring)
+                multiplier = 1
+            
+            # Add dart to game state
+            result = current_game.add_dart(dart_score, multiplier)
+            print(f"🎯 Dart added to game: {dart_score} x{multiplier} = {result}")
 
         # --- Draw visualization on warped board ---
         cv2.circle(vis_img, (wx, wy), 8, (0, 0, 255), -1)  # red dot
@@ -794,8 +817,14 @@ async def detect_dart(file: UploadFile = File(...)):
 
 @app.post("/reset-turn")
 async def reset_turn():
-    global turn_darts
+    global turn_darts, current_game
     turn_darts = []
+    
+    if current_game is not None:
+        # Reset turn in game state
+        current_game.end_turn(force=True)
+        print("🔄 Turn reset in game state")
+    
     return {"status": "turn reset"}
 
 @app.get("/debug-visual")
@@ -883,7 +912,7 @@ async def stop_live_tracking():
 @app.post("/live-dart-detect")
 async def live_dart_detect(file: UploadFile = File(...)):
     """Process a frame for live dart detection."""
-    global dart_history, turn_darts, last_transform, last_warp_size, last_scoring_map
+    global dart_history, turn_darts, current_game, last_transform, last_warp_size, last_scoring_map
     global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg
     
     if last_transform is None:
@@ -931,15 +960,38 @@ async def live_dart_detect(file: UploadFile = File(...)):
         dart_history.append(dart_entry)
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
+        
+        # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic
+        if current_game is not None:
+            # Determine multiplier based on dart position (simplified logic)
+            multiplier = 1  # Default to single
+            if dart_score == 50:  # Bullseye
+                multiplier = 1
+            elif dart_score > 20:  # Triple ring (outer ring)
+                multiplier = 3
+            elif dart_score > 10:  # Double ring (middle ring)
+                multiplier = 2
+            else:  # Single ring (inner ring)
+                multiplier = 1
+            
+            # Add dart to game state
+            result = current_game.add_dart(dart_score, multiplier)
+            print(f"🎯 Live dart added to game: {dart_score} x{multiplier} = {result}")
     
     # Only return darts if we actually detected some
     if new_darts:
+        # Get current game state if available
+        game_update = None
+        if current_game is not None:
+            game_update = current_game.get_state()
+        
         return {
             "status": "success",
             "darts": new_darts,
             "message": f"Detected {len(new_darts)} dart(s)",
             "total_darts": len(dart_history),
-            "turn_darts": len(turn_darts)
+            "turn_darts": len(turn_darts),
+            "game_update": game_update
         }
     else:
         return {
@@ -947,7 +999,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "message": "No new darts detected",
             "darts": [],
             "total_darts": len(dart_history),
-            "turn_darts": len(turn_darts)
+            "turn_darts": len(turn_darts),
+            "game_update": None
         }
 
 class GameStartRequest(BaseModel):
@@ -957,7 +1010,14 @@ class GameStartRequest(BaseModel):
 @app.post("/start-game")
 async def start_game(request: GameStartRequest):
     """Start a new game with specified mode and players."""
-    global dart_history, turn_darts
+    global dart_history, turn_darts, current_game
+    
+    # Create new game instance with real GameState
+    current_game = GameState(
+        mode=request.mode,
+        players=request.players,
+        double_out=True
+    )
     
     # Reset game state
     dart_history = []
@@ -966,45 +1026,63 @@ async def start_game(request: GameStartRequest):
     return {
         "status": "success",
         "message": "Game started successfully",
-        "game_state": {
-            "mode": request.mode,
-            "players": request.players,
-            "current_player": 1,
-            "remaining_score": 501
-        }
+        "game_state": current_game.get_state()
     }
 
 @app.post("/end-turn")
 async def end_turn():
     """End the current turn and calculate final scores."""
-    global turn_darts
+    global turn_darts, current_game
     
-    turn_total = sum(d["score"] for d in turn_darts)
-    turn_darts = []  # Reset for next turn
+    if current_game is None:
+        return JSONResponse({"error": "No game in progress"}, status_code=400)
+    
+    # End turn using real GameState
+    current_game.end_turn()
+    
+    # Get updated game state
+    game_state = current_game.get_state()
     
     return {
         "status": "success",
         "message": "Turn ended successfully",
-        "turn_total": turn_total,
-        "game_state": {
-            "current_player": 1,  # You can enhance this
-            "remaining_score": 501,  # You can enhance this
-            "players": [{"name": "Player 1", "remaining_score": 501, "legs_won": 0, "sets_won": 0}]
-        }
+        "turn_total": sum(d["score"] for d in turn_darts),
+        "game_state": game_state
     }
 
 @app.get("/game-state")
 async def get_game_state():
     """Get current game state."""
+    global current_game
+    
+    if current_game is None:
+        return JSONResponse({"error": "No game in progress"}, status_code=400)
+    
+    # Get real game state from GameState instance
+    game_state = current_game.get_state()
+    
     return {
         "status": "success",
-        "game_state": {
-            "current_player": 1,
-            "remaining_score": 501,
-            "players": [{"name": "Player 1", "remaining_score": 501, "legs_won": 0, "sets_won": 0}],
-            "dart_history": dart_history,
-            "turn_darts": turn_darts
-        }
+        "game_state": game_state
+    }
+
+@app.get("/current-score")
+async def get_current_score():
+    """Get current player's remaining score."""
+    global current_game
+    
+    if current_game is None:
+        return JSONResponse({"error": "No game in progress"}, status_code=400)
+    
+    current_player = current_game.players[current_game.current_player]
+    remaining_score = current_game.scores[current_player]
+    
+    return {
+        "status": "success",
+        "current_player": current_player,
+        "remaining_score": remaining_score,
+        "turn_darts": len(current_game.turn_darts),
+        "game_mode": current_game.mode
     }
 
 # ===============================
@@ -1036,7 +1114,11 @@ def root():
             "/live-dart-detect (POST)",
             "/start-game (POST)",
             "/end-turn (POST)",
-            "/game-state (GET)"
+            "/game-state (GET)",
+            "/current-score (GET)",
+            "/board-overlay (GET)",
+            "/board-overlay-visual (GET)",
+            "/debug-board (GET)"
         ]
     }
 
@@ -1076,6 +1158,61 @@ def get_board_overlay():
         }
     }
 
+@app.get("/board-overlay-visual")
+def get_board_overlay_visual():
+    """Get the actual visual overlay image that the API generates."""
+    global last_warped_img, last_masks_dict, last_bull_info
+    
+    if last_warped_img is None or last_bull_info is None:
+        return JSONResponse({"error": "Board not initialized"}, status_code=400)
+    
+    try:
+        # Create the overlay using your existing draw_wedges_aligned function
+        bull_center, radius = last_bull_info
+        
+        # Generate the overlay with wedges and scoring zones
+        overlay_img, _, scores_order, masks_dict = draw_wedges_aligned(
+            last_warped_img, bull_center, alpha=0.6
+        )
+        
+        # Add bullseye center indicator
+        cv2.circle(overlay_img, (int(bull_center[0]), int(bull_center[1])), 5, (0, 255, 255), -1)
+        
+        # Add scoring zone labels
+        h, w = overlay_img.shape[:2]
+        ang_step = 2 * np.pi / 20
+        start_angle = -np.pi/2  # Start from top (20 wedge)
+        
+        for i, score in enumerate(scores_order):
+            angle = start_angle + i * ang_step
+            x = int(bull_center[0] + (radius * 0.7) * np.cos(angle))
+            y = int(bull_center[1] + (radius * 0.7) * np.sin(angle))
+            
+            # Ensure text is within image bounds
+            if 0 <= x < w and 0 <= y < h:
+                cv2.putText(
+                    overlay_img, str(score), (x-10, y+5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA
+                )
+        
+        # Convert to base64 for Flutter
+        _, buffer = cv2.imencode('.png', overlay_img)
+        overlay_b64 = base64.b64encode(buffer).decode('utf-8')
+        
+        return {
+            "status": "success",
+            "overlay_image": base64.b64encode(buffer).decode('utf-8'),
+            "overlay_info": {
+                "board_center": [int(bull_center[0]), int(bull_center[1])],
+                "board_radius": int(radius),
+                "scores_order": scores_order,
+            }
+        }
+        
+    except Exception as e:
+        print(f"Error generating overlay: {e}")
+        return JSONResponse({"error": f"Failed to generate overlay: {str(e)}"}, status_code=500)
+
 @app.get("/ping")
 def ping():
     return {"pong": True, "timestamp": "now"}
@@ -1103,3 +1240,4 @@ def healthz():
         },
         "render_status": "Memory optimized for 2GB RAM (1 CPU, 2GB)"
     }
+ch
