@@ -849,6 +849,160 @@ async def debug_visual():
     }
 
 # ===============================
+# --- Live Tracking Endpoints
+# ===============================
+
+@app.post("/start-live-tracking")
+async def start_live_tracking():
+    """Start live tracking mode for automatic dart detection."""
+    global dart_history, turn_darts
+    
+    # Reset tracking state
+    dart_history = []
+    turn_darts = []
+    
+    return {
+        "status": "success",
+        "message": "Live tracking started successfully",
+        "tracking_active": True
+    }
+
+@app.post("/stop-live-tracking")
+async def stop_live_tracking():
+    """Stop live tracking mode."""
+    return {
+        "status": "success",
+        "message": "Live tracking stopped successfully",
+        "tracking_active": False
+    }
+
+@app.post("/live-dart-detect")
+async def live_dart_detect(file: UploadFile = File(...)):
+    """Process a frame for live dart detection."""
+    global dart_history, turn_darts, last_transform, last_warp_size, last_scoring_map
+    global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg
+    
+    if last_transform is None:
+        return JSONResponse({"error": "Board not initialized"}, status_code=400)
+    
+    contents = await file.read()
+    npimg = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    
+    # Detect darts using existing detection logic
+    detections = run_detector(image)
+    if not detections:
+        return {
+            "status": "no_board",
+            "message": "No dartboard detected in frame",
+            "darts": [],
+            "game_update": None
+        }
+    
+    # Process detections
+    new_darts = []
+    h, w = last_warp_size
+    
+    # Invert the homography: image → warped board
+    inv_transform = np.linalg.inv(last_transform)
+    
+    for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
+        # Project tip into warped coordinates
+        pt = np.array([[[tip_x, tip_y]]], dtype="float32")
+        warped_pt = cv2.perspectiveTransform(pt, inv_transform)[0][0]
+        wx, wy = int(np.clip(warped_pt[0], 0, w - 1)), int(np.clip(warped_pt[1], 0, h - 1))
+        
+        dart_score = int(last_scoring_map[wy, wx])
+        
+        dart_entry = {
+            "bbox": [int(x1), int(y1), int(x2), int(y2)],
+            "confidence": float(conf),
+            "tip": [int(tip_x), int(tip_y)],
+            "tip_warped": [wx, wy],
+            "x": wx,
+            "y": wy,
+            "score": dart_score
+        }
+        
+        dart_history.append(dart_entry)
+        turn_darts.append(dart_entry)
+        new_darts.append(dart_entry)
+    
+    # Return game update
+    game_update = {
+        "game_state": {
+            "current_player": 1,  # You can enhance this
+            "remaining_score": 501,  # You can enhance this
+            "players": [{"name": "Player 1", "remaining_score": 501, "legs_won": 0, "sets_won": 0}]
+        },
+        "new_darts": new_darts,
+        "turn_total": sum(d["score"] for d in turn_darts)
+    }
+    
+    return {
+        "status": "success",
+        "darts": new_darts,
+        "game_update": game_update
+    }
+
+class GameStartRequest(BaseModel):
+    mode: str = "501"
+    players: list = ["Player 1"]
+
+@app.post("/start-game")
+async def start_game(request: GameStartRequest):
+    """Start a new game with specified mode and players."""
+    global dart_history, turn_darts
+    
+    # Reset game state
+    dart_history = []
+    turn_darts = []
+    
+    return {
+        "status": "success",
+        "message": "Game started successfully",
+        "game_state": {
+            "mode": request.mode,
+            "players": request.players,
+            "current_player": 1,
+            "remaining_score": 501
+        }
+    }
+
+@app.post("/end-turn")
+async def end_turn():
+    """End the current turn and calculate final scores."""
+    global turn_darts
+    
+    turn_total = sum(d["score"] for d in turn_darts)
+    turn_darts = []  # Reset for next turn
+    
+    return {
+        "status": "success",
+        "message": "Turn ended successfully",
+        "turn_total": turn_total,
+        "game_state": {
+            "current_player": 1,  # You can enhance this
+            "remaining_score": 501,  # You can enhance this
+            "players": [{"name": "Player 1", "remaining_score": 501, "legs_won": 0, "sets_won": 0}]
+        }
+    }
+
+@app.get("/game-state")
+async def get_game_state():
+    """Get current game state."""
+    return {
+        "status": "success",
+        "game_state": {
+            "current_player": 1,
+            "remaining_score": 501,
+            "players": [{"name": "Player 1", "remaining_score": 501, "legs_won": 0, "sets_won": 0}],
+            "dart_history": dart_history,
+            "turn_darts": turn_darts
+        }
+    }
+
+# ===============================
 # --- Run
 # ===============================
 if __name__ == "__main__":
@@ -871,7 +1025,13 @@ def root():
             "/detect-dart (POST)", 
             "/reset-turn (POST)",
             "/debug-visual (GET)",
-            "/healthz (GET)"
+            "/healthz (GET)",
+            "/start-live-tracking (POST)",
+            "/stop-live-tracking (POST)",
+            "/live-dart-detect (POST)",
+            "/start-game (POST)",
+            "/end-turn (POST)",
+            "/game-state (GET)"
         ]
     }
 
