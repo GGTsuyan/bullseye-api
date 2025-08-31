@@ -15,7 +15,7 @@ applications:
       - key: TF_FORCE_GPU_ALLOW_GROWTH
         value: false
       - key: TF_MEMORY_ALLOCATION
-        value: 0.3
+        value: 0.2
       - key: TF_CPP_VMODULE
         value: "tensorflow=0"
       - key: OMP_NUM_THREADS
@@ -30,13 +30,7 @@ applications:
         value: "0"
       - key: TF_ENABLE_CPU_OPTIMIZATION
         value: "0"
-      - key: TF_ENABLE_ONEDNN_OPTS
-        value: "0"
       - key: PIP_NO_CACHE_DIR
         value: "1"
       - key: PIP_DISABLE_PIP_VERSION_CHECK
-        value: "1"
-      - key: PYTHONUNBUFFERED
-        value: "1"
-      - key: PYTHONDONTWRITEBYTECODE
         value: "1"

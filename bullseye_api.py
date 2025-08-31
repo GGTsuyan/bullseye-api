@@ -632,10 +632,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
+    port = os.environ.get('PORT', '8000')
     print("🚀 Bullseye API starting up...")
     print(f"🌐 Host: 0.0.0.0")
-    print(f"🔌 Port: {os.environ.get('PORT', '8000')}")
-    print("✅ API ready to receive requests")
+    print(f"🔌 Port: {port}")
+    print(f"💾 Memory limit: 20% of available RAM")
+    print(f"🔧 TensorFlow CPU-only mode")
+    print("✅ API ready to receive requests on port " + str(port))
 
 @app.post("/init-board")
 async def init_board(file: UploadFile = File(...)):
@@ -852,7 +855,10 @@ async def debug_visual():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Starting Bullseye API on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    print(f"🌐 Host: 0.0.0.0")
+    print(f"🔌 Port: {port}")
+    print(f"💾 Memory limit: 20% of available RAM")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", access_log=True)
 
 @app.get("/")
 def root():
