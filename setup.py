@@ -9,9 +9,9 @@ setup(
         "fastapi",
         "uvicorn[standard]",
         "python-multipart",
-        "tensorflow-cpu==2.21.0"
+        "tensorflow-cpu==2.20.0",
         "opencv-python-headless",
-        "numpy==2.2.0"
+        "numpy==2.2.0",
         "psutil",
         "Pillow",
         "typing-extensions<4.6.0",
