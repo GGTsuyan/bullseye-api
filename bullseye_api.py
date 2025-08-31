@@ -1208,8 +1208,8 @@ def debug_board():
 @app.post("/create-yellow-circle-overlay")
 async def create_yellow_circle_overlay(file: UploadFile = File(...)):
     """
-    Create a yellow circle/ellipse overlay that outlines the detected dartboard.
-    Uses detect_dartboard_tf and creates a visualizer with green/red mask detection.
+    Create a yellow overlay that follows the actual scoring zone boundaries of the dartboard.
+    Uses detect_dartboard_tf and creates a visualizer that sticks to the scoring region outline.
     """
     try:
         # Read the uploaded image
@@ -1368,12 +1368,8 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
         
         print("✅ Image is sharp - camera is stable")
         
-        # Fit ellipse to the contour
-        ellipse = cv2.fitEllipse(largest_contour)
-        (center_x, center_y), (major_axis, minor_axis), angle = ellipse
-        
-        # Step 4: Create visualization with yellow circle/ellipse
-        print("🎨 Creating yellow circle/ellipse overlay...")
+        # Step 4: Create scoring zone boundary overlay (like the green outline in screenshot)
+        print("🎨 Creating scoring zone boundary overlay...")
         
         # Create a copy of the original image for visualization
         vis_image = image.copy()
@@ -1383,66 +1379,110 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
             x1, y1, x2, y2 = coarse_box
             cv2.rectangle(vis_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
         
-        # Draw the red and green masks as colored overlays
-        # Create colored masks for visualization
-        red_overlay = np.zeros_like(image)
-        red_overlay[mask_red > 0] = [0, 0, 255]  # Red in BGR
-        green_overlay = np.zeros_like(image)
-        green_overlay[mask_green > 0] = [0, 255, 0]  # Green in BGR
+        # Create the scoring zone overlay using draw_wedges_aligned approach
+        # First, we need to detect the bullseye center
+        bull_center, radius = detect_bullseye(coarse_crop)
         
-        # Blend the overlays
-        vis_image = cv2.addWeighted(vis_image, 0.7, red_overlay, 0.3, 0)
-        vis_image = cv2.addWeighted(vis_image, 0.7, green_overlay, 0.3, 0)
-        
-        # Draw the yellow ellipse/circle
-        # Use ellipse if the camera is angled, circle if straight on
-        if abs(angle) > 5 and abs(major_axis - minor_axis) > 10:
-            # Camera is angled - draw ellipse
-            print("📐 Camera is angled - drawing ellipse")
-            cv2.ellipse(vis_image, ellipse, (0, 255, 255), 3)  # Yellow ellipse
+        if bull_center is not None:
+            # Convert bull_center to original image coordinates
+            if coarse_box is not None:
+                x1, y1, x2, y2 = coarse_box
+                # Scale coordinates from cropped image back to original
+                scale_x = (x2 - x1) / 640
+                scale_y = (y2 - y1) / 640
+                bull_center_orig = (
+                    int(x1 + bull_center[0] * scale_x),
+                    int(y1 + bull_center[1] * scale_y)
+                )
+                radius_orig = int(radius * min(scale_x, scale_y))
+            else:
+                bull_center_orig = bull_center
+                radius_orig = radius
+            
+            # Create the scoring zone boundary overlay
+            # This will create the yellow outline that follows the actual scoring zones
+            
+            # Method 1: Use the actual contour from the mask (most accurate)
+            # Find the outer boundary of the scoring zones
+            outer_contour = largest_contour
+            
+            # Draw the yellow outline following the actual scoring zone boundary
+            cv2.drawContours(vis_image, [outer_contour], -1, (0, 255, 255), 3)
+            
+            # Method 2: Create a more refined boundary using the wedge masks
+            # This creates a smoother outline that follows the scoring zones exactly
+            h, w = coarse_crop.shape[:2]
+            ang_step = 2 * np.pi / 20  # 20 wedges
+            
+            # Find the top wedge boundary for alignment
+            # This ensures the overlay is properly oriented
+            top_angle = -np.pi/2  # Start from top (20 wedge)
+            
+            # Create the scoring zone boundary points
+            boundary_points = []
+            for i in range(20):
+                angle = top_angle + i * ang_step
+                # Use the actual radius from the detected contour
+                radius_actual = cv2.arcLength(outer_contour, True) / (2 * np.pi)
+                x = int(bull_center_orig[0] + radius_actual * np.cos(angle))
+                y = int(bull_center_orig[1] + radius_actual * np.sin(angle))
+                boundary_points.append([x, y])
+            
+            # Draw the yellow boundary line connecting all points
+            if len(boundary_points) > 2:
+                boundary_points = np.array(boundary_points, dtype=np.int32)
+                cv2.polylines(vis_image, [boundary_points], True, (0, 255, 255), 3)
+            
+            # Add the bullseye center indicator
+            cv2.circle(vis_image, bull_center_orig, 5, (0, 255, 255), -1)
+            
+            # Add scoring zone labels (optional - for debugging)
+            for i, score in enumerate(scores_order):
+                angle = top_angle + i * ang_step
+                x = int(bull_center_orig[0] + (radius_orig * 0.7) * np.cos(angle))
+                y = int(bull_center_orig[1] + (radius_orig * 0.7) * np.sin(angle))
+                
+                # Ensure text is within image bounds
+                if 0 <= x < vis_image.shape[1] and 0 <= y < vis_image.shape[0]:
+                    cv2.putText(
+                        vis_image, str(score), (x-10, y+5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA
+                    )
         else:
-            # Camera is straight on - draw circle
-            print("📱 Camera is straight on - drawing circle")
-            radius = int((major_axis + minor_axis) / 2)
-            cv2.circle(vis_image, (int(center_x), int(center_y)), radius, (0, 255, 255), 3)
+            # Fallback: if bullseye detection fails, use the simple ellipse approach
+            print("⚠️ Bullseye detection failed, using fallback ellipse method")
+            ellipse = cv2.fitEllipse(largest_contour)
+            (center_x, center_y), (major_axis, minor_axis), angle = ellipse
+            
+            # Draw the yellow ellipse
+            cv2.ellipse(vis_image, ellipse, (0, 255, 255), 3)
+            
+            # Update variables for response
+            bull_center_orig = (int(center_x), int(center_y))
+            radius_orig = int((major_axis + minor_axis) / 2)
         
         # Add text labels
         cv2.putText(vis_image, f"Confidence: {conf:.2f}", (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(vis_image, f"Center: ({int(center_x)}, {int(center_y)})", (10, 60), 
+        cv2.putText(vis_image, f"Center: ({bull_center_orig[0]}, {bull_center_orig[1]})", (10, 60), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(vis_image, f"Size: {int(major_axis)}x{int(minor_axis)}", (10, 90), 
+        cv2.putText(vis_image, f"Radius: {radius_orig}", (10, 90), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Convert to base64 for Flutter
         _, buffer = cv2.imencode('.png', vis_image)
         overlay_b64 = base64.b64encode(buffer).decode('utf-8')
         
-        # Calculate the overlay position in the original image coordinates
-        if coarse_box is not None:
-            x1, y1, x2, y2 = coarse_box
-            # Adjust center coordinates to original image space
-            center_x_orig = x1 + center_x * (x2 - x1) / 640
-            center_y_orig = y1 + center_y * (y2 - y1) / 640
-            radius_orig = radius * min((x2 - x1) / 640, (y2 - y1) / 640)
-        else:
-            center_x_orig = center_x
-            center_y_orig = center_y
-            radius_orig = (major_axis + minor_axis) / 2
-        
         return {
             "status": "success",
-            "message": "Yellow circle/ellipse overlay created successfully",
+            "message": "Scoring zone boundary overlay created successfully",
             "overlay_image": overlay_b64,
             "overlay_data": {
-                "board_center": [int(center_x_orig), int(center_y_orig)],
-                "board_radius": int(radius_orig),
+                "board_center": [bull_center_orig[0], bull_center_orig[1]],
+                "board_radius": radius_orig,
                 "confidence": float(conf),
-                "ellipse_angle": float(angle),
-                "major_axis": float(major_axis),
-                "minor_axis": float(minor_axis),
-                "is_angled": abs(angle) > 5 and abs(major_axis - minor_axis) > 10,
-                "detection_method": "tensorflow + color_mask",
+                "detection_method": "tensorflow + scoring_zone_boundary",
+                "scoring_zones_detected": len(scores_order) if 'scores_order' in locals() else 0,
                 "stability_metrics": {
                     "camera_stable": True,
                     "red_coverage": float(red_coverage),
@@ -1456,7 +1496,7 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
         }
         
     except Exception as e:
-        print(f"❌ Error creating yellow circle overlay: {e}")
+        print(f"❌ Error creating scoring zone boundary overlay: {e}")
         return JSONResponse({"error": f"Failed to create overlay: {str(e)}"}, status_code=500)
 
 @app.get("/board-overlay")
