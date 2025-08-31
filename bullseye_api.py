@@ -1175,6 +1175,7 @@ def root():
             "/init-board (POST)",
             "/detect-dart (POST)", 
             "/detect-dart-debug (POST)",  # 🆕 Debug endpoint
+            "/create-yellow-circle-overlay (POST)",  # 🆕 Yellow circle overlay
             "/reset-turn (POST)",
             "/debug-visual (GET)",
             "/healthz (GET)",
@@ -1204,6 +1205,260 @@ def debug_board():
         "last_bull_info": last_bull_info
     }
 
+@app.post("/create-yellow-circle-overlay")
+async def create_yellow_circle_overlay(file: UploadFile = File(...)):
+    """
+    Create a yellow circle/ellipse overlay that outlines the detected dartboard.
+    Uses detect_dartboard_tf and creates a visualizer with green/red mask detection.
+    """
+    try:
+        # Read the uploaded image
+        contents = await file.read()
+        npimg = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            return JSONResponse({"error": "Invalid image"}, status_code=400)
+        
+        # Step 1: Detect dartboard using detect_dartboard_tf
+        print("🎯 Detecting dartboard using TensorFlow...")
+        coarse_crop, coarse_box, conf = detect_dartboard_tf(image)
+        
+        if coarse_crop is None:
+            return JSONResponse({"error": "Dartboard not detected"}, status_code=404)
+        
+        print(f"✅ Dartboard detected with confidence: {conf}")
+        
+        # Step 2: Create green and red mask detection
+        print("🎨 Creating green and red masks...")
+        hsv = cv2.cvtColor(coarse_crop, cv2.COLOR_BGR2HSV)
+        
+        # Red mask (two ranges for red color)
+        lower_red1, upper_red1 = np.array([0, 80, 80]), np.array([10, 255, 255])
+        lower_red2, upper_red2 = np.array([160, 80, 80]), np.array([179, 255, 255])
+        mask_red = cv2.bitwise_or(
+            cv2.inRange(hsv, lower_red1, upper_red1),
+            cv2.inRange(hsv, lower_red2, upper_red2)
+        )
+        
+        # Green mask
+        lower_green, upper_green = np.array([35, 50, 50]), np.array([90, 255, 255])
+        mask_green = cv2.inRange(hsv, lower_green, upper_green)
+        
+        # Combine red and green masks
+        ring_mask = cv2.bitwise_or(mask_red, mask_green)
+        
+        # Clean up the mask
+        kernel = np.ones((5, 5), np.uint8)
+        ring_mask = cv2.morphologyEx(ring_mask, cv2.MORPH_CLOSE, kernel)
+        ring_mask = cv2.morphologyEx(ring_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Step 2.5: Check camera stability by analyzing mask quality
+        print("📱 Checking camera stability...")
+        
+        # Calculate mask statistics for stability assessment
+        red_pixels = cv2.countNonZero(mask_red)
+        green_pixels = cv2.countNonZero(mask_green)
+        total_pixels = mask_red.shape[0] * mask_red.shape[1]
+        
+        # Calculate mask coverage percentages
+        red_coverage = red_pixels / total_pixels
+        green_coverage = green_pixels / total_pixels
+        combined_coverage = (red_pixels + green_pixels) / total_pixels
+        
+        print(f"📊 Mask coverage - Red: {red_coverage:.3f}, Green: {green_coverage:.3f}, Combined: {combined_coverage:.3f}")
+        
+        # Check if masks are well-defined (stable camera)
+        min_red_coverage = 0.01    # At least 1% red pixels
+        min_green_coverage = 0.01  # At least 1% green pixels
+        min_combined_coverage = 0.02  # At least 2% combined pixels
+        
+        camera_stable = (
+            red_coverage >= min_red_coverage and 
+            green_coverage >= min_green_coverage and 
+            combined_coverage >= min_combined_coverage
+        )
+        
+        if not camera_stable:
+            print("❌ Camera not stable - masks too weak")
+            return JSONResponse({
+                "error": "Camera not stable enough for accurate detection",
+                "details": {
+                    "red_coverage": red_coverage,
+                    "green_coverage": green_coverage,
+                    "combined_coverage": combined_coverage,
+                    "min_required": {
+                        "red": min_red_coverage,
+                        "green": min_green_coverage,
+                        "combined": min_combined_coverage
+                    }
+                }
+            }, status_code=400)
+        
+        print("✅ Camera is stable - masks are well-defined")
+        
+        # Step 3: Find contours and fit ellipse
+        print("🔍 Finding contours and fitting ellipse...")
+        contours, _ = cv2.findContours(ring_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return JSONResponse({"error": "No contours found in mask"}, status_code=404)
+        
+        # Find the largest contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        if len(largest_contour) < 5:
+            return JSONResponse({"error": "Contour too small for ellipse fitting"}, status_code=404)
+        
+        # Additional stability check: contour quality and blur detection
+        contour_area = cv2.contourArea(largest_contour)
+        contour_perimeter = cv2.arcLength(largest_contour, True)
+        
+        # Calculate contour circularity (should be close to 1 for a good circle)
+        if contour_perimeter > 0:
+            circularity = 4 * np.pi * contour_area / (contour_perimeter * contour_perimeter)
+        else:
+            circularity = 0
+        
+        print(f"📐 Contour analysis - Area: {contour_area:.0f}, Perimeter: {contour_perimeter:.0f}, Circularity: {circularity:.3f}")
+        
+        # Check if contour is well-formed (stable camera)
+        min_circularity = 0.3  # Minimum circularity for stable detection
+        min_contour_area = 1000  # Minimum contour area
+        
+        if circularity < min_circularity or contour_area < min_contour_area:
+            print("❌ Contour quality too poor - camera may be moving or blurry")
+            return JSONResponse({
+                "error": "Contour quality too poor for accurate detection",
+                "details": {
+                    "circularity": circularity,
+                    "contour_area": contour_area,
+                    "min_required": {
+                        "circularity": min_circularity,
+                        "contour_area": min_contour_area
+                    }
+                }
+            }, status_code=400)
+        
+        print("✅ Contour quality is good - camera is stable")
+        
+        # Additional stability check: image sharpness (blur detection)
+        print("🔍 Checking image sharpness...")
+        
+        # Convert to grayscale for blur detection
+        gray_crop = cv2.cvtColor(coarse_crop, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate Laplacian variance (higher = sharper image)
+        laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
+        
+        print(f"📸 Image sharpness (Laplacian variance): {laplacian_var:.2f}")
+        
+        # Check if image is sharp enough (not blurry)
+        min_sharpness = 50.0  # Minimum Laplacian variance for sharp image
+        
+        if laplacian_var < min_sharpness:
+            print("❌ Image too blurry - camera may be moving")
+            return JSONResponse({
+                "error": "Image too blurry for accurate detection",
+                "details": {
+                    "sharpness": laplacian_var,
+                    "min_required": min_sharpness
+                }
+            }, status_code=400)
+        
+        print("✅ Image is sharp - camera is stable")
+        
+        # Fit ellipse to the contour
+        ellipse = cv2.fitEllipse(largest_contour)
+        (center_x, center_y), (major_axis, minor_axis), angle = ellipse
+        
+        # Step 4: Create visualization with yellow circle/ellipse
+        print("🎨 Creating yellow circle/ellipse overlay...")
+        
+        # Create a copy of the original image for visualization
+        vis_image = image.copy()
+        
+        # Draw the detected dartboard bounding box
+        if coarse_box is not None:
+            x1, y1, x2, y2 = coarse_box
+            cv2.rectangle(vis_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        
+        # Draw the red and green masks as colored overlays
+        # Create colored masks for visualization
+        red_overlay = np.zeros_like(image)
+        red_overlay[mask_red > 0] = [0, 0, 255]  # Red in BGR
+        green_overlay = np.zeros_like(image)
+        green_overlay[mask_green > 0] = [0, 255, 0]  # Green in BGR
+        
+        # Blend the overlays
+        vis_image = cv2.addWeighted(vis_image, 0.7, red_overlay, 0.3, 0)
+        vis_image = cv2.addWeighted(vis_image, 0.7, green_overlay, 0.3, 0)
+        
+        # Draw the yellow ellipse/circle
+        # Use ellipse if the camera is angled, circle if straight on
+        if abs(angle) > 5 and abs(major_axis - minor_axis) > 10:
+            # Camera is angled - draw ellipse
+            print("📐 Camera is angled - drawing ellipse")
+            cv2.ellipse(vis_image, ellipse, (0, 255, 255), 3)  # Yellow ellipse
+        else:
+            # Camera is straight on - draw circle
+            print("📱 Camera is straight on - drawing circle")
+            radius = int((major_axis + minor_axis) / 2)
+            cv2.circle(vis_image, (int(center_x), int(center_y)), radius, (0, 255, 255), 3)
+        
+        # Add text labels
+        cv2.putText(vis_image, f"Confidence: {conf:.2f}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(vis_image, f"Center: ({int(center_x)}, {int(center_y)})", (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(vis_image, f"Size: {int(major_axis)}x{int(minor_axis)}", (10, 90), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Convert to base64 for Flutter
+        _, buffer = cv2.imencode('.png', vis_image)
+        overlay_b64 = base64.b64encode(buffer).decode('utf-8')
+        
+        # Calculate the overlay position in the original image coordinates
+        if coarse_box is not None:
+            x1, y1, x2, y2 = coarse_box
+            # Adjust center coordinates to original image space
+            center_x_orig = x1 + center_x * (x2 - x1) / 640
+            center_y_orig = y1 + center_y * (y2 - y1) / 640
+            radius_orig = radius * min((x2 - x1) / 640, (y2 - y1) / 640)
+        else:
+            center_x_orig = center_x
+            center_y_orig = center_y
+            radius_orig = (major_axis + minor_axis) / 2
+        
+        return {
+            "status": "success",
+            "message": "Yellow circle/ellipse overlay created successfully",
+            "overlay_image": overlay_b64,
+            "overlay_data": {
+                "board_center": [int(center_x_orig), int(center_y_orig)],
+                "board_radius": int(radius_orig),
+                "confidence": float(conf),
+                "ellipse_angle": float(angle),
+                "major_axis": float(major_axis),
+                "minor_axis": float(minor_axis),
+                "is_angled": abs(angle) > 5 and abs(major_axis - minor_axis) > 10,
+                "detection_method": "tensorflow + color_mask",
+                "stability_metrics": {
+                    "camera_stable": True,
+                    "red_coverage": float(red_coverage),
+                    "green_coverage": float(green_coverage),
+                    "combined_coverage": float(combined_coverage),
+                    "contour_circularity": float(circularity),
+                    "contour_area": int(contour_area),
+                    "image_sharpness": float(laplacian_var)
+                }
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Error creating yellow circle overlay: {e}")
+        return JSONResponse({"error": f"Failed to create overlay: {str(e)}"}, status_code=500)
+
 @app.get("/board-overlay")
 def get_board_overlay():
     """Get board overlay information for Flutter app visualization."""
@@ -1222,6 +1477,7 @@ def get_board_overlay():
             "board_size": [w, h],
             "transform_matrix": str(last_transform),
             "scoring_map_shape": last_scoring_map.shape,
+            "total_darts": len(dart_history),
             "total_darts": len(dart_history),
             "turn_darts": len(turn_darts)
         }
