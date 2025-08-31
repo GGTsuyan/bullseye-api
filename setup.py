@@ -16,11 +16,13 @@ setup(
         "Pillow",
         "typing-extensions<4.6.0",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.9,<3.12",
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
     ],
 )
