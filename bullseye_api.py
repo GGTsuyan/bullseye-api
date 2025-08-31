@@ -1000,7 +1000,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "game_update": None
         }
     
-    # Process detections
+    # Process detections with deduplication
     new_darts = []
     h, w = last_warp_size
     
@@ -1015,6 +1015,35 @@ async def live_dart_detect(file: UploadFile = File(...)):
         
         dart_score = int(last_scoring_map[wy, wx])
         
+        # 🚫 DEDUPLICATION: Check if this dart is already detected
+        is_duplicate = False
+        
+        # Check recent darts for duplicates (last 5 darts)
+        recent_darts = dart_history[-5:] if len(dart_history) > 5 else dart_history
+        
+        for existing_dart in recent_darts:
+            existing_wx = existing_dart.get('x', 0)
+            existing_wy = existing_dart.get('y', 0)
+            existing_score = existing_dart.get('score', 0)
+            
+            # Calculate distance between dart positions
+            distance = ((wx - existing_wx) ** 2 + (wy - existing_wy) ** 2) ** 0.5
+            
+            # If positions are very close (within 10 pixels) and scores are the same, it's a duplicate
+            if distance < 10.0 and dart_score == existing_score:
+                print(f"🔄 Duplicate dart detected at position ({wx}, {wy}) with score {dart_score} - skipping")
+                is_duplicate = True
+                break
+        
+        # Skip this dart if it's a duplicate
+        if is_duplicate:
+            continue
+        
+        # Check if we already have too many darts in this turn (max 3)
+        if len(turn_darts) >= 3:
+            print(f"⚠️ Turn already has 3 darts, skipping new detection")
+            continue
+        
         dart_entry = {
             "bbox": [int(x1), int(y1), int(x2), int(y2)],
             "confidence": float(conf),
@@ -1028,6 +1057,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
         dart_history.append(dart_entry)
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
+        
+        print(f"✅ New dart detected: {dart_score} points at position ({wx}, {wy})")
         
         # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic
         if current_game is not None:
@@ -1056,7 +1087,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
         return {
             "status": "success",
             "darts": new_darts,
-            "message": f"Detected {len(new_darts)} dart(s)",
+            "message": f"Detected {len(new_darts)} new dart(s)",
             "total_darts": len(dart_history),
             "turn_darts": len(turn_darts),
             "game_update": game_update
