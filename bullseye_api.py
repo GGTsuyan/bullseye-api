@@ -1240,4 +1240,3 @@ def healthz():
         },
         "render_status": "Memory optimized for 2GB RAM (1 CPU, 2GB)"
     }
-ch
