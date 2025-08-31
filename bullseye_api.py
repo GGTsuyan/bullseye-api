@@ -3,7 +3,14 @@ import math
 import os
 import cv2
 import numpy as np
+
+# Required TensorFlow import
 import tensorflow as tf
+
+# Force TensorFlow to use CPU only (disable GPU)
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+tf.config.set_visible_devices([], 'GPU')
+
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -11,16 +18,22 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import globals
-from game_logic import GameState
-import asyncio
-from typing import Optional
 
 # ===============================
 # --- Load TensorFlow Dart Model
 # ===============================
-MODEL_DIR = "exported_dart_dartboard_modelv2/saved_model"
-model = tf.saved_model.load(MODEL_DIR)
-infer = model.signatures["serving_default"]
+MODEL_DIR = "models/saved_model"  # Updated path to your model location
+
+try:
+    model = tf.saved_model.load(MODEL_DIR)
+    infer = model.signatures["serving_default"]
+    print("✅ TensorFlow model loaded successfully from", MODEL_DIR)
+    print("🔧 TensorFlow configured for CPU-only usage")
+except Exception as e:
+    print(f"❌ Failed to load TensorFlow model: {e}")
+    print(f"❌ Model path: {MODEL_DIR}")
+    print("❌ Please ensure the model files exist and TensorFlow is properly installed")
+    raise RuntimeError(f"TensorFlow model loading failed: {e}")
 
 CONFIDENCE_THRESHOLD = 0.3
 DART_CLASS_ID = 1
@@ -28,12 +41,7 @@ MAX_DARTS = 1
 
 LABEL_MAP = {1: "dart", 2: "dartboard"}
 
-# ===============================
-# --- Live Tracking State
-# ===============================
-live_tracking_active = False
-live_tracking_task = None
-frame_processing_rate = 15  # FPS for live tracking
+
 
 # ===============================
 # --- Globals (board + darts)
@@ -75,32 +83,36 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
 # --- Dart Detector Wrapper
 # ===============================
 def run_detector(image_bgr):
-    h_orig, w_orig, _ = image_bgr.shape
-    image_resized = cv2.resize(image_bgr, (640, 640))
-    input_tensor = tf.convert_to_tensor(image_resized)[tf.newaxis, ...]
-    input_tensor = tf.cast(input_tensor, tf.uint8)
+    try:
+        h_orig, w_orig, _ = image_bgr.shape
+        image_resized = cv2.resize(image_bgr, (640, 640))
+        input_tensor = tf.convert_to_tensor(image_resized)[tf.newaxis, ...]
+        input_tensor = tf.cast(input_tensor, tf.uint8)
 
-    outputs = infer(input_tensor)
-    boxes = outputs["detection_boxes"][0].numpy()
-    scores = outputs["detection_scores"][0].numpy()
-    classes = outputs["detection_classes"][0].numpy().astype(int)
+        outputs = infer(input_tensor)
+        boxes = outputs["detection_boxes"][0].numpy()
+        scores = outputs["detection_scores"][0].numpy()
+        classes = outputs["detection_classes"][0].numpy().astype(int)
 
-    results = []
-    for box, score, cls in zip(boxes, scores, classes):
-        if score < CONFIDENCE_THRESHOLD: continue
-        if cls != DART_CLASS_ID: continue
+        results = []
+        for box, score, cls in zip(boxes, scores, classes):
+            if score < CONFIDENCE_THRESHOLD: continue
+            if cls != DART_CLASS_ID: continue
 
-        ymin, xmin, ymax, xmax = box
-        x1, y1 = int(xmin * w_orig), int(ymin * h_orig)
-        x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
+            ymin, xmin, ymax, xmax = box
+            x1, y1 = int(xmin * w_orig), int(ymin * h_orig)
+            x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
 
-        tip_x, tip_y = find_dart_tip(x1, y1, x2, y2, image_bgr)
-        results.append((x1, y1, x2, y2, score, tip_x, tip_y))
+            tip_x, tip_y = find_dart_tip(x1, y1, x2, y2, image_bgr)
+            results.append((x1, y1, x2, y2, score, tip_x, tip_y))
 
-    results.sort(key=lambda x: x[4], reverse=True)
-    if MAX_DARTS == 1 and results:
-        return [results[0]]
-    return results
+        results.sort(key=lambda x: x[4], reverse=True)
+        if MAX_DARTS == 1 and results:
+            return [results[0]]
+        return results
+    except Exception as e:
+        print(f"❌ TensorFlow detection failed: {e}")
+        raise RuntimeError(f"Dart detection failed: {e}")
 
 def get_red_mask(hsv):
     """Binary mask for red regions (covers hue wrap-around)."""
@@ -230,7 +242,7 @@ def detect_dartboard_tf(image, width=640, height=640):
 
     except Exception as e:
         print("TF Detection error:", e)
-        return None, None, None
+        raise RuntimeError(f"Dartboard detection failed: {e}")
     
 
 # -------------------------------
@@ -492,128 +504,6 @@ def classify_score_with_wedges(
     # --- Default single ---
     return wedge_score
 
-def draw_wedges_aligned(scoring_img, bull_center, alpha=0.4):
-    h, w = scoring_img.shape[:2]
-    cx, cy = bull_center if bull_center else (w // 2, h // 2)
-
-    # Extend lines to the very edge (double ring)
-    radius = int(2 * min(cx, cy, w - cx, h - cy))
-
-    scores_order = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17,
-                    3, 19, 7, 16, 8, 11, 14, 9, 12, 5]
-
-    vis = scoring_img.copy()
-    vis_clean = scoring_img.copy()  # <-- will stay clean
-    masks_dict = {}
-    ang_step = 2 * np.pi / 20  # radians per wedge
-
-    # ----------------------------
-    # Build HSV masks (only once)
-    # ----------------------------
-    hsv = cv2.cvtColor(scoring_img, cv2.COLOR_BGR2HSV)
-
-    # Red regions (double ring, single ring, etc.)
-    red1 = cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
-    red2 = cv2.inRange(hsv, (170, 70, 50), (180, 255, 255))
-    red_mask = cv2.bitwise_or(red1, red2)
-
-    # Black regions (alternate wedges)
-    black_mask = cv2.inRange(hsv, (0, 0, 0), (180, 80, 80))
-
-    # Combined mask for centroid analysis
-    combined_mask = cv2.bitwise_or(black_mask, red_mask)
-
-    # 🔑 Get top wedge boundaries (angles in radians)
-    left_angle, right_angle = detect_top_wedge_boundaries(scoring_img, (cx, cy), radius, red_mask)
-
-    # Center of top wedge
-    top_angle = (left_angle + right_angle) / 2.0
-    # Align wedges so that top wedge is score 20
-    start_angle = top_angle - (ang_step / 2.0)
-
-    # ----------------------------
-    # Detect actual wedge color centroid to rotate scores_order
-    # ----------------------------
-    '''
-    contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        top_cnt = min(contours, key=lambda c: cv2.boundingRect(c)[1])
-        M = cv2.moments(top_cnt)
-        if M["m00"] > 0:
-            tx = int(M["m10"] / M["m00"])
-            ty = int(M["m01"] / M["m00"])
-            dx, dy = tx - cx, ty - cy
-            cnt_angle = np.arctan2(dy, dx)  # radians
-            # Find wedge index from center
-            idx = int(((cnt_angle - start_angle) % (2*np.pi)) / ang_step)
-            while scores_order[idx] != 20:
-                scores_order = scores_order[1:] + scores_order[:1]
-                '''
-    # ----------------------------
-
-    # Draw wedges + transparent lines
-    overlay = vis.copy()  # for transparent line drawing
-    for i, score in enumerate(scores_order):
-        start = start_angle + i * ang_step
-        end = start + ang_step
-
-        # Create wedge mask
-        mask = np.zeros((h, w), np.uint8)
-        cv2.ellipse(mask, (cx, cy), (radius, radius), 0,
-                    np.degrees(start), np.degrees(end), 255, -1)
-        masks_dict[score] = mask
-
-        # Draw wedge boundary lines on overlay
-        ex = int(cx + radius * np.cos(start))
-        ey = int(cy + radius * np.sin(start))
-        cv2.line(overlay, (cx, cy), (ex, ey), (255, 0, 0), 1, cv2.LINE_AA)
-
-    # Blend overlay with vis for semi-transparent lines
-    vis = cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0)
-
-    return vis, vis_clean, scores_order, masks_dict
-
-def detect_top_wedge_boundaries(image, center, radius, red_mask):
-    """
-    Detect the left and right angles of the topmost red region (double 20).
-    Returns (theta_left, theta_right).
-    """
-    cx, cy = center
-
-    # --- Step 1: find red contours ---
-    contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    top_contour = None
-    top_y = 1e9
-    for cnt in contours:
-        if cv2.contourArea(cnt) < 50:  # ignore noise
-            continue
-        M = cv2.moments(cnt)
-        if M["m00"] == 0:
-            continue
-        cy_cnt = int(M["m01"] / M["m00"])
-        if cy_cnt < top_y:  # smallest y = topmost
-            top_y = cy_cnt
-            top_contour = cnt
-
-    if top_contour is None:
-        print("⚠ No red wedge detected, fallback to default")
-        return -np.pi/2 - (np.pi/20), -np.pi/2 + (np.pi/20)  # 20 wedge approx top
-
-    # --- Step 2: get extreme left/right points of top red contour ---
-    leftmost = tuple(top_contour[top_contour[:,:,0].argmin()][0])
-    rightmost = tuple(top_contour[top_contour[:,:,0].argmax()][0])
-
-    # Convert to angles (relative to board center)
-    theta_left = np.arctan2(leftmost[1]-cy, leftmost[0]-cx)
-    theta_right = np.arctan2(rightmost[1]-cy, rightmost[0]-cx)
-
-    # Normalize so right is always greater than left
-    if theta_right < theta_left:
-        theta_right += 2*np.pi
-
-    return theta_left, theta_right
-
 def make_color_masks(warped_img):
     """Return red/green masks for scoring detection."""
     hsv = cv2.cvtColor(warped_img, cv2.COLOR_BGR2HSV)
@@ -629,144 +519,6 @@ def make_color_masks(warped_img):
     mask_green = cv2.inRange(hsv, np.array(GREEN[0]), np.array(GREEN[1]))
 
     return mask_red, mask_green
-
-def detect_bullseye(img, center_hint=None):
-    """
-    Find inner/outer bull using red mask, preferring blobs near center_hint.
-    Returns: (image, (cx,cy), r)
-    """
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower_red1, upper_red1 = np.array([0, 80, 80]), np.array([10, 255, 255])
-    lower_red2, upper_red2 = np.array([160, 80, 80]), np.array([179, 255, 255])
-    mask = cv2.bitwise_or(
-        cv2.inRange(hsv, lower_red1, upper_red1),
-        cv2.inRange(hsv, lower_red2, upper_red2),
-    )
-
-    h, w = mask.shape
-    if center_hint is None:
-        cx, cy = w // 2, h // 2
-    else:
-        cx, cy = int(center_hint[0]), int(center_hint[1])
-
-    # Emphasize inner region around the expected center
-    inner_r = int(0.28 * min(cx, cy, w - cx, h - cy))
-    if inner_r > 0:
-        inner = np.zeros_like(mask)
-        cv2.circle(inner, (cx, cy), inner_r, 255, -1)
-        mask = cv2.bitwise_and(mask, inner)
-
-    mask = cv2.medianBlur(mask, 5)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return img, (cx, cy), int(0.06 * (min(h, w) // 2))
-
-    # Choose blob closest to center (small penalty for size)
-    candidates = []
-    for c in cnts:
-        (x, y), r = cv2.minEnclosingCircle(c)
-        d = np.hypot(x - cx, y - cy)
-        candidates.append((d + 0.5 * r, (int(x), int(y)), int(r)))
-    candidates.sort(key=lambda t: t[0])
-    _, center, r = candidates[0]
-    return img, center, r
-
-def detect_top_wedge_boundaries(image, center, radius, red_mask):
-    """
-    Detect the left and right angles of the topmost red region (double 20).
-    Returns (theta_left, theta_right).
-    """
-    cx, cy = center
-
-    # --- Step 1: find red contours ---
-    contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    top_contour = None
-    top_y = 1e9
-    for cnt in contours:
-        if cv2.contourArea(cnt) < 50:  # ignore noise
-            continue
-        M = cv2.moments(cnt)
-        if M["m00"] == 0:
-            continue
-        cy_cnt = int(M["m01"] / M["m00"])
-        if cy_cnt < top_y:  # smallest y = topmost
-            top_y = cy_cnt
-            top_contour = cnt
-
-    if top_contour is None:
-        print("⚠ No red wedge detected, fallback to default")
-        return -np.pi/2 - (np.pi/20), -np.pi/2 + (np.pi/20)  # 20 wedge approx top
-
-    # --- Step 2: get extreme left/right points of top red contour ---
-    leftmost = tuple(top_contour[top_contour[:,:,0].argmin()][0])
-    rightmost = tuple(top_contour[top_contour[:,:,0].argmax()][0])
-
-    # Convert to angles (relative to board center)
-    theta_left = np.arctan2(leftmost[1]-cy, leftmost[0]-cx)
-    theta_right = np.arctan2(rightmost[1]-cy, rightmost[0]-cx)
-
-    # Normalize so right is always greater than left
-    if theta_right < theta_left:
-        theta_right += 2*np.pi
-
-    return theta_left, theta_right
-
-def generate_visualizer(camera_index=0):
-    """Generate video stream for board visualization"""
-    cap = cv2.VideoCapture(camera_index)
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Step 1: detect dartboard with TF model or HSV fallback
-        coarse_crop, coarse_box, conf = detect_dartboard_tf(frame)
-        method = "tf"
-        if coarse_crop is None:
-            coarse_crop, coarse_box, conf = detect_dartboard_hsv(frame)
-            method = "hsv"
-
-        if coarse_crop is not None and coarse_box is not None:
-            # Step 2: warp scoring region
-            warped, box, ellipse, M_crop2warp = warp_to_scoring_region(coarse_crop)
-
-            if warped is not None and ellipse is not None:
-                (cx, cy), (MA, ma), angle = ellipse
-                radius = int(min(MA, ma) / 2)
-
-                # Circle center in warped coordinates
-                warped_center = np.array([[cx, cy]], dtype="float32")
-
-                # Map back to original frame
-                x1, y1, x2, y2 = coarse_box
-                M_offset = np.array([[1, 0, x1], [0, 1, y1], [0, 0, 1]], dtype=np.float32)
-                if M_crop2warp is not None:
-                    M_inv = np.linalg.inv(M_crop2warp @ np.array([[1,0,-x1],[0,1,-y1],[0,0,1]], dtype=np.float32))
-                    pts = cv2.perspectiveTransform(np.array([[[cx, cy]]], dtype="float32"), M_inv)
-                    px, py = int(pts[0,0,0]), int(pts[0,0,1])
-                    cv2.circle(frame, (px, py), radius, (0,255,0), 2)
-                else:
-                    # fallback: just draw inside coarse_box
-                    px, py = int(cx + x1), int(cy + y1)
-                    cv2.circle(frame, (px, py), radius, (0,255,0), 2)
-
-                cv2.putText(frame, f"{method.upper()} warp guide", (20,30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
-
-        # Encode frame as JPEG
-        ret, jpeg = cv2.imencode('.jpg', frame)
-        if not ret:
-            continue
-        frame_bytes = jpeg.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-
-    cap.release()
-
 def process_dartboard(image):
     coarse_crop, coarse_box, conf = detect_dartboard_tf(image)
     method = "tf"
@@ -819,32 +571,122 @@ def process_dartboard(image):
             scoring_method, masks_dict, (bull_center, radius),
             (mask_red, mask_green), scoring_img, M_full)
 
-def detect_darts_and_scores(image):
-    """
-    Detect darts on the original image and return their coordinates and scores.
-    This function is optimized for real-time live tracking.
-    """
-    global last_warped_img, last_warp_size, last_scoring_map, last_transform
-    
-    if (globals.last_warped_img is None or 
-        globals.last_warp_size is None or 
-        globals.last_scoring_map is None or 
-        globals.last_transform is None):
-        return [], None
-    
-    darts = []
-    detections = run_detector(image)
+# ===============================
+# --- FastAPI App
+# ===============================
+app = FastAPI(title="Bullseye API", version="2.0.0")
 
+# Add CORS middleware to allow Flutter app to connect
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+@app.post("/init-board")
+async def init_board(file: UploadFile = File(...)):
+    
+    contents = await file.read()
+    npimg = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+
+    # --- Run dartboard detection ---
+    result = process_dartboard(image)
+    if result[0] is None:
+        return JSONResponse({"error": "Dartboard not found"}, status_code=404)
+
+    (
+        wedges_vis, scores_order, scoring_box_global, conf,
+        scoring_method, masks_dict, bull_info,
+        masks_rg, warped_img, M_full
+    ) = result
+
+    bull_center, radius = bull_info
+    mask_red, mask_green = masks_rg
+
+    # --- Build scoring map (pixel → score) ---
+    h, w = wedges_vis.shape[:2]
+    scoring_map_full = np.zeros((h, w), np.int32)
+
+    ys, xs = np.indices((h, w))
+    for x, y in zip(xs.flatten(), ys.flatten()):
+        try:
+            score_val = classify_score_with_wedges(
+                int(x), int(y),
+                int(bull_center[0]), int(bull_center[1]),
+                int(radius),
+                masks_dict,
+                warped_img,
+                mask_red=mask_red,
+                mask_green=mask_green
+            )
+        except Exception:
+            score_val = 0
+        scoring_map_full[y, x] = score_val
+
+    # --- Save globals for later use ---
+    global last_scoring_map, last_scoring_shape
+    global last_masks_dict, last_bull_info, last_warped_img
+    global last_masks_rg, last_scores_order, last_transform, last_warp_size
+    global last_warped_dart_img, dart_history, turn_darts
+
+    last_scoring_map = scoring_map_full.copy()
+    last_scoring_shape = scoring_map_full.shape
+    last_masks_dict = masks_dict.copy()
+    last_bull_info = bull_info
+    last_warped_img = warped_img.copy()
+    last_masks_rg = (mask_red, mask_green)
+    last_scores_order = scores_order
+    last_transform = M_full
+    last_warp_size = (w, h)
+    last_warped_dart_img = None
+    dart_history = []
+    turn_darts = []
+
+    return {
+        "status": "dartboard initialized",
+        "detected": True,
+        "confidence": conf,
+        "bbox": scoring_box_global,
+        "method": scoring_method,
+        "scores_order": scores_order,
+        "scoring_map_shape": scoring_map_full.shape,
+        "scoring_map_dtype": str(scoring_map_full.dtype),
+        "bull_info": {
+            "center": [int(bull_center[0]), int(bull_center[1])],
+            "radius": int(radius)
+        }
+    }
+
+@app.post("/detect-dart")
+async def detect_dart(file: UploadFile = File(...)):
+    global dart_history, turn_darts
+    global last_transform, last_warp_size, last_scoring_map
+    global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg
+    global last_warped_dart_img
+
+    if last_transform is None:
+        return JSONResponse({"error": "Board not initialized"}, status_code=400)
+
+    contents = await file.read()
+    npimg = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+
+    # --- Detect darts on the ORIGINAL image ---
+    detections = run_detector(image)
     if not detections:
-        return darts, None
+        return JSONResponse({"error": "No dart detected"}, status_code=404)
 
     # Work on a copy of the clean warped board
-    vis_img = globals.last_warped_img.copy()
+    vis_img = last_warped_img.copy()
 
-    h, w = globals.last_warp_size
+    new_darts = []
+    h, w = last_warp_size
 
     # Invert the homography: image → warped board
-    inv_transform = np.linalg.inv(globals.last_transform)
+    inv_transform = np.linalg.inv(last_transform)
 
     for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
         # Project tip into warped coordinates
@@ -852,7 +694,7 @@ def detect_darts_and_scores(image):
         warped_pt = cv2.perspectiveTransform(pt, inv_transform)[0][0]
         wx, wy = int(np.clip(warped_pt[0], 0, w - 1)), int(np.clip(warped_pt[1], 0, h - 1))
 
-        dart_score = int(globals.last_scoring_map[wy, wx])
+        dart_score = int(last_scoring_map[wy, wx])
 
         dart_entry = {
             "bbox": [int(x1), int(y1), int(x2), int(y2)],
@@ -864,7 +706,9 @@ def detect_darts_and_scores(image):
             "score": dart_score
         }
 
-        darts.append(dart_entry)
+        dart_history.append(dart_entry)
+        turn_darts.append(dart_entry)
+        new_darts.append(dart_entry)
 
         # --- Draw visualization on warped board ---
         cv2.circle(vis_img, (wx, wy), 8, (0, 0, 255), -1)  # red dot
@@ -875,323 +719,80 @@ def detect_darts_and_scores(image):
             (0, 255, 0), 2
         )
 
-    return darts, vis_img
+    last_warped_dart_img = vis_img.copy()
 
-# ===============================
-# --- FastAPI App
-# ===============================
-app = FastAPI(title="Bullseye Live Tracking API", version="2.0.0")
+    # Encode visualization to base64
+    _, buf = cv2.imencode(".png", vis_img)
+    img_b64 = base64.b64encode(buf).decode("utf-8")
 
-# Add CORS middleware to allow Flutter app to connect
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
-)
-
-# =========================
-# ----- ROOT ENDPOINTS ----
-# =========================
-@app.get("/")
-def root():
     return {
-        "status": "Bullseye Live Tracking API is running",
-        "version": "2.0.0",
-        "endpoints": [
-            "/init-board (POST)",
-            "/detect-dart (POST)", 
-            "/start-live-tracking (POST)",
-            "/stop-live-tracking (POST)",
-            "/live-dart-detect (POST)",
-            "/start-game (POST)",
-            "/throw (POST)",
-            "/end-turn (POST)",
-            "/game-state (GET)",
-            "/healthz (GET)"
-        ]
+        "new_darts": new_darts,
+        "turn_darts": turn_darts,
+        "all_darts": dart_history,
+        "turn_total": int(sum(d["score"] for d in turn_darts)),
+        "visualization": img_b64
     }
 
-@app.get("/healthz")
-def healthz():
-    return {"ok": True, "live_tracking": live_tracking_active}
 
-# =========================
-# ----- LIVE TRACKING ----
-# =========================
-@app.post("/start-live-tracking")
-async def start_live_tracking():
-    global live_tracking_active, live_tracking_task
-    
-    if live_tracking_active:
-        return {"status": "Live tracking already active"}
-    
-    live_tracking_active = True
-    
-    # Start background task for live tracking
-    live_tracking_task = asyncio.create_task(live_tracking_loop())
-    
-    return {
-        "status": "Live tracking started",
-        "fps": frame_processing_rate,
-        "message": "Camera will now continuously detect darts automatically"
-    }
+@app.post("/reset-turn")
+async def reset_turn():
+    global turn_darts
+    turn_darts = []
+    return {"status": "turn reset"}
 
-@app.post("/stop-live-tracking")
-async def stop_live_tracking():
-    global live_tracking_active, live_tracking_task
-    
-    if not live_tracking_active:
-        return {"status": "Live tracking not active"}
-    
-    live_tracking_active = False
-    
-    if live_tracking_task:
-        live_tracking_task.cancel()
-        live_tracking_task = None
-    
-    return {"status": "Live tracking stopped"}
+@app.get("/debug-visual")
+async def debug_visual():
+    global dart_history, last_warped_img, last_warped_dart_img, last_warp_size
 
-async def live_tracking_loop():
-    """Background task for continuous dart detection"""
-    global live_tracking_active
-    
-    while live_tracking_active:
-        try:
-            # This loop runs continuously while live tracking is active
-            # The actual frame processing happens in /live-dart-detect endpoint
-            await asyncio.sleep(1.0 / frame_processing_rate)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"Live tracking loop error: {e}")
-            await asyncio.sleep(1.0)
+    if last_warped_img is None or last_warp_size is None:
+        return JSONResponse({"error": "Board not initialized"}, status_code=400)
 
-@app.post("/live-dart-detect")
-async def live_dart_detect(file: UploadFile = File(...)):
-    """
-    Optimized endpoint for live tracking - processes frames continuously
-    Returns dart detection results for real-time updates
-    """
-    if not live_tracking_active:
-        return JSONResponse(
-            {"error": "Live tracking not active. Call /start-live-tracking first."}, 
-            status_code=400
-        )
-    
-    try:
-        contents = await file.read()
-        npimg = np.frombuffer(contents, np.uint8)
-        image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-        
-        if image is None:
-            return JSONResponse({"error": "Invalid image"}, status_code=400)
-        
-        # Auto-detect dartboard if not already initialized
-        if globals.last_scoring_map is None:
-            result = process_dartboard(image)
-            if result[0] is None:
-                return {"status": "no_board", "message": "Dartboard not detected yet"}
-            
-            # Initialize the board automatically
-            _initialize_board_from_result(result)
-        
-        # Detect darts using existing scoring map
-        darts, _ = detect_darts_and_scores(image)
-        
-        # Update game state if darts detected
-        game_update = None
-        if darts and hasattr(globals, 'game') and globals.game:
-            game_update = _process_darts_for_game(darts)
-        
-        return {
-            "status": "success",
-            "darts": darts,
-            "board_initialized": globals.last_scoring_map is not None,
-            "game_update": game_update,
-            "timestamp": asyncio.get_event_loop().time()
-        }
-        
-    except Exception as e:
-        return JSONResponse(
-            {"error": f"Live detection failed: {str(e)}"}, 
-            status_code=500
-        )
+    images_out = {}
 
-def _initialize_board_from_result(result):
-    """Helper function to initialize board from process_dartboard result"""
-    (
-        wedges_vis, scores_order, scoring_box_global, conf,
-        scoring_method, masks_dict, bull_info,
-        masks_rg, warped_img, M_full
-    ) = result
+    # --- Clean warped board (reference) ---
+    _, buf_clean = cv2.imencode(".png", last_warped_img)
+    images_out["clean_image_b64"] = base64.b64encode(buf_clean).decode("utf-8")
 
-    bull_center, radius = bull_info
-    mask_red, mask_green = masks_rg
+    if last_warped_dart_img is not None:
+        # --- Dart overlay on warped dart photo ---
+        vis = last_warped_dart_img.copy()
+        colors = [(0, 255, 0), (0, 165, 255), (0, 0, 255), (255, 0, 255)]
 
-    # Build scoring map once
-    h, w = warped_img.shape[:2]
-    scoring_map_full = np.zeros((h, w), np.int32)
-    ys, xs = np.indices((h, w))
-    for x, y in zip(xs.flatten(), ys.flatten()):
-        try:
-            scoring_map_full[y, x] = classify_score_with_wedges(
-                int(x), int(y),
-                int(bull_center[0]), int(bull_center[1]), int(radius),
-                masks_dict, warped_img, mask_red=mask_red, mask_green=mask_green
+        for i, d in enumerate(dart_history):
+            if "tip_warped" not in d:
+                continue
+            wx, wy = map(int, d["tip_warped"])
+            color = colors[i % len(colors)]
+
+            cv2.circle(vis, (wx, wy), 10, color, -1)
+            if "bbox" in d:
+                x1, y1, x2, y2 = map(int, d["bbox"])
+                cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+
+            cv2.putText(
+                vis, str(d.get("score", "?")), (wx + 12, wy - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA
             )
-        except Exception:
-            scoring_map_full[y, x] = 0
 
-    # Save globals for later use
-    globals.last_scoring_map = scoring_map_full.copy()
-    globals.last_scoring_shape = scoring_map_full.shape
-    globals.last_masks_dict = masks_dict.copy()
-    globals.last_bull_info = bull_info
-    globals.last_warped_img = warped_img.copy()
-    globals.last_masks_rg = (mask_red, mask_green)
-    globals.last_scores_order = scores_order
-    globals.last_transform = M_full
-    globals.last_warp_size = (w, h)
-    globals.last_warped_dart_img = None
-    globals.dart_history = []
-    globals.turn_darts = []
+        _, buf_darts = cv2.imencode(".png", vis)
+        images_out["darts_image_b64"] = base64.b64encode(buf_darts).decode("utf-8")
 
-def _process_darts_for_game(darts):
-    """Helper function to process detected darts for game logic"""
-    if not darts or not hasattr(globals, 'game') or not globals.game:
-        return None
-    
-    # Process each detected dart
-    results = []
-    for dart in darts:
-        dart_score = dart["score"]
-        multiplier = 1  # Default to single, could be enhanced with ML
-        
-        # Add dart to game
-        result = globals.game.add_dart(dart_score, multiplier)
-        results.append({
-            "dart_score": dart_score,
-            "multiplier": multiplier,
-            "result": result,
-            "position": dart["tip_warped"]
-        })
-    
-    return {
-        "results": results,
-        "game_state": globals.game.get_state()
-    }
+        # --- Side-by-side comparison ---
+        h = max(last_warp_size[1], vis.shape[0])
+        w = last_warp_size[0] * 2
+        side = np.zeros((h, w, 3), dtype=np.uint8)
 
-# =========================
-# ----- INIT BOARD --------
-# =========================
-@app.post("/init-board")
-async def init_board(file: UploadFile = File(...)):
-    contents = await file.read()
-    npimg = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+        side[:last_warped_img.shape[0], :last_warped_img.shape[1]] = last_warped_img
+        side[:vis.shape[0], last_warped_img.shape[1]:last_warped_img.shape[1]+vis.shape[1]] = vis
 
-    result = process_dartboard(image)
-    if result[0] is None:
-        return JSONResponse({"error": "Dartboard not found"}, status_code=404)
-
-    _initialize_board_from_result(result)
+        _, buf_side = cv2.imencode(".png", side)
+        images_out["comparison_image_b64"] = base64.b64encode(buf_side).decode("utf-8")
 
     return {
-        "status": "dartboard initialized",
-        "confidence": result[3],  # conf
-        "bbox": result[2],        # scoring_box_global
-        "scores_order": result[1], # scores_order
-        "bull_info": {
-            "center": [int(result[6][0][0]), int(result[6][0][1])],  # bull_center
-            "radius": int(result[6][1])  # radius
-        }
+        "status": "ok",
+        "dart_count": len(dart_history),
+        **images_out
     }
-
-# =========================
-# ----- DETECT DART -------
-# =========================
-@app.post("/detect-dart")
-async def detect_dart(file: UploadFile = File(...)):
-    contents = await file.read()
-    npimg = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-
-    # Detect darts using existing scoring map
-    darts, _ = detect_darts_and_scores(image)
-    if not darts:
-        return JSONResponse({"error": "No dart detected"}, status_code=404)
-
-    return {
-        "darts": darts,
-        "turn_total": int(sum(d["score"] for d in darts))
-    }
-
-# =========================
-# ----- GAME ROUTES -------
-# =========================
-@app.post("/start-game")
-async def start_game(mode: str = "501", players: list[str] = ["Player 1"]):
-    try:
-        globals.game = GameState(mode=mode, players=players)
-        return {"success": True, "game_state": globals.game.get_state()}
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"success": False, "error": str(e)})
-
-@app.post("/throw")
-async def throw_dart(file: UploadFile = File(...)):
-    if not hasattr(globals, "game") or globals.game is None:
-        return JSONResponse(status_code=400, content={"success": False, "error": "Game not started"})
-
-    contents = await file.read()
-    npimg = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-
-    darts, _ = detect_darts_and_scores(image)
-    if not darts:
-        return JSONResponse({"error": "No dart detected"}, status_code=404)
-
-    dart_score = darts[0]["score"]
-
-    player = globals.game.players[globals.game.current_player]
-    result = globals.game.add_dart(player, dart_score)
-    globals.game.turn_darts.append(dart_score)
-
-    return {
-        "success": True,
-        "dart_score": dart_score,
-        "result": result,
-        "game_state": globals.game.get_state()
-    }
-
-@app.get("/visualize-board")
-async def visualize_board():
-    return StreamingResponse(generate_visualizer(0),
-                             media_type="multipart/x-mixed-replace; boundary=frame")
-
-@app.post("/end-turn")
-async def end_turn():
-    if not hasattr(globals, "game") or globals.game is None:
-        return JSONResponse(status_code=400, content={"success": False, "error": "Game not started"})
-
-    globals.game.end_turn(force=True)
-    return {"success": True, "game_state": globals.game.get_state()}
-
-@app.post("/next-player")
-async def next_player():
-    if not hasattr(globals, "game") or globals.game is None:
-        return JSONResponse(status_code=400, content={"success": False, "error": "Game not started"})
-
-    globals.game.next_player()
-    return {"success": True, "game_state": globals.game.get_state()}
-
-@app.get("/game-state")
-async def get_game_state():
-    if not hasattr(globals, "game") or globals.game is None:
-        return JSONResponse(status_code=400, content={"success": False, "error": "Game not started"})
-
-    return {"success": True, "game_state": globals.game.get_state()}
 
 # ===============================
 # --- Run
@@ -1199,3 +800,23 @@ async def get_game_state():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+@app.get("/")
+def root():
+    return {
+        "status": "Bullseye API is running",
+        "version": "2.0.0",
+        "model_loaded": True,
+        "model_path": MODEL_DIR,
+        "endpoints": [
+            "/init-board (POST)",
+            "/detect-dart (POST)", 
+            "/reset-turn (POST)",
+            "/debug-visual (GET)",
+            "/healthz (GET)"
+        ]
+    }
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
