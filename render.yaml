@@ -2,7 +2,7 @@ applications:
   - name: bullseye-api-v4
     type: web
     env: python
-    plan: free
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn bullseye_api:app --host 0.0.0.0 --port $PORT --workers 1
     envVars:
@@ -13,11 +13,11 @@ applications:
       - key: TF_FORCE_GPU_ALLOW_GROWTH
         value: false
       - key: TF_MEMORY_ALLOCATION
-        value: 0.15
+        value: 0.6
       - key: TF_CPP_VMODULE
         value: "tensorflow=0"
       - key: OMP_NUM_THREADS
-        value: 1
+        value: 2
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: PYTHONDONTWRITEBYTECODE

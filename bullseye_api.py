@@ -11,19 +11,16 @@ import tensorflow as tf
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 tf.config.set_visible_devices([], 'GPU')
 
-# Memory optimization for Render deployment
+# Memory optimization for Render deployment (2GB RAM available)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'false'
-os.environ['TF_MEMORY_ALLOCATION'] = '0.15'  # Use only 15% of available memory
-os.environ['OMP_NUM_THREADS'] = '1'  # Limit OpenMP threads
+os.environ['TF_MEMORY_ALLOCATION'] = '0.6'  # Use 60% of available memory (1.2GB)
+os.environ['OMP_NUM_THREADS'] = '2'  # Allow 2 threads for 1 CPU
 os.environ['TF_CPP_VMODULE'] = 'tensorflow=0'  # Disable verbose logging
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable Intel optimizations
 os.environ['TF_ENABLE_MKL_NATIVE_FORMAT'] = '0'  # Disable MKL optimizations
-os.environ['TF_ENABLE_CPU_OPTIMIZATION'] = '0'  # Disable CPU optimizations
 os.environ['TF_USE_CUDNN'] = '0'  # Disable cuDNN
 os.environ['TF_USE_CUDA'] = '0'  # Disable CUDA
-os.environ['TF_ENABLE_CPU_OPTIMIZATION'] = '0'  # Disable CPU optimizations
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable Intel optimizations
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
@@ -67,7 +64,7 @@ try:
     print("✅ TensorFlow model loaded successfully from", MODEL_DIR)
     print("🔧 TensorFlow configured for CPU-only usage")
     print("💾 Memory optimization applied for Render deployment")
-    print("🧠 Memory limit: 15% of available RAM")
+    print("🧠 Memory limit: 60% of available RAM (1.2GB)")
 except Exception as e:
     print(f"❌ Failed to load TensorFlow model: {e}")
     print(f"❌ Model path: {MODEL_DIR}")
@@ -638,7 +635,7 @@ async def startup_event():
     print("🚀 Bullseye API starting up...")
     print(f"🌐 Host: 0.0.0.0")
     print(f"🔌 Port: {port}")
-    print(f"💾 Memory limit: 15% of available RAM")
+    print(f"💾 Memory limit: 60% of available RAM (1.2GB)")
     print(f"🔧 TensorFlow CPU-only mode")
     print("✅ API ready to receive requests on port " + str(port))
 
@@ -903,5 +900,5 @@ def healthz():
             "percent": f"{memory_info.percent:.1f}%",
             "tensorflow_memory": tf_memory
         },
-        "render_status": "Memory optimized for 512MB limit"
+        "render_status": "Memory optimized for 2GB RAM (1 CPU, 2GB)"
     }
