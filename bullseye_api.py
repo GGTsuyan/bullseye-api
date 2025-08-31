@@ -611,6 +611,13 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+@app.on_event("startup")
+async def startup_event():
+    print("🚀 Bullseye API starting up...")
+    print(f"🌐 Host: 0.0.0.0")
+    print(f"🔌 Port: {os.environ.get('PORT', '8000')}")
+    print("✅ API ready to receive requests")
+
 @app.post("/init-board")
 async def init_board(file: UploadFile = File(...)):
     
@@ -825,7 +832,8 @@ async def debug_visual():
 # ===============================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print(f"🚀 Starting Bullseye API on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
 
 @app.get("/")
 def root():
@@ -842,6 +850,10 @@ def root():
             "/healthz (GET)"
         ]
     }
+
+@app.get("/ping")
+def ping():
+    return {"pong": True, "timestamp": "now"}
 
 @app.get("/healthz")
 def healthz():
