@@ -4,12 +4,12 @@ applications:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
+    # Use $PORT environment variable set by Render
     startCommand: uvicorn bullseye_api:app --host 0.0.0.0 --port $PORT --workers 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.13
-      - key: PORT
-        value: 8000
+      # PORT is automatically set by Render, don't override it
       - key: TF_CPP_MIN_LOG_LEVEL
         value: 2
       - key: TF_FORCE_GPU_ALLOW_GROWTH
