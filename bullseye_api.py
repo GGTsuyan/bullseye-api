@@ -28,6 +28,10 @@ import uvicorn
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+class StartGameRequest(BaseModel):
+    mode: str = "501"
+    players: list[str] = ["Player 1"]
 import globals
 from game_logic import GameState
 
