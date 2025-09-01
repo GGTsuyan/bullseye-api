@@ -28,10 +28,10 @@ import uvicorn
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
 class StartGameRequest(BaseModel):
     mode: str = "501"
     players: list[str] = ["Player 1"]
+
 import globals
 from game_logic import GameState
 
@@ -1124,6 +1124,23 @@ async def live_dart_detect(file: UploadFile = File(...)):
 class GameStartRequest(BaseModel):
     mode: str = "501"
     players: list = ["Player 1"]
+
+class DartRequest(BaseModel):
+    score: int
+    multiplier: int = 1
+
+@app.post("/process-dart")
+async def process_dart(request: DartRequest):
+    global current_game
+    if current_game is None:
+        return {"status": "error", "message": "No game in progress"}
+
+    result = current_game.add_dart(request.score, request.multiplier)
+    return {
+        "status": "success",
+        "result": result,
+        "game_state": current_game.get_state()
+    }
 
 @app.post("/start-game")
 async def start_game(request: GameStartRequest):
