@@ -189,8 +189,8 @@ def run_detector(image_bgr, debug=False):
             # box = (x1, y1, x2, y2, score, tip_x, tip_y)
             xA = max(boxA[0], boxB[0])
             yA = max(boxA[1], boxB[1])
-            xB = min(boxA[2], boxB[2])
-            yB = min(boxA[3], boxB[1])
+            xB = min(boxA[2], boxB[2])  # ✅ fix
+            yB = min(boxA[3], boxB[3])  # ✅ fix
             interW = max(0, xB - xA)
             interH = max(0, yB - yA)
             interArea = interW * interH
@@ -203,7 +203,7 @@ def run_detector(image_bgr, debug=False):
         for r in results:
             keep = True
             for fr in filtered_results:
-                if iou(r, fr) > 0.3:  # IoU threshold (30%)
+                if iou(r, fr) > 0.2:  # IoU threshold (20%)
                     keep = False
                     break
             if keep:
