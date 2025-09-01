@@ -153,63 +153,41 @@ def run_detector(image_bgr, debug=False):
         input_tensor = tf.cast(input_tensor, tf.uint8)
 
         outputs = infer(input_tensor)
-        boxes = outputs["detection_boxes"][0].numpy()
+        boxes = outputs["detection_boxes"][0].numpy()   # normalized [ymin, xmin, ymax, xmax]
         scores = outputs["detection_scores"][0].numpy()
         classes = outputs["detection_classes"][0].numpy().astype(int)
 
         # Clear input tensor to free memory
         del input_tensor
 
-        results = []
-        for box, score, cls in zip(boxes, scores, classes):
-            if score < CONFIDENCE_THRESHOLD: continue
-            if cls != DART_CLASS_ID: continue
+        # --- Apply TensorFlow Non-Max Suppression ---
+        selected_indices = tf.image.non_max_suppression(
+            boxes=boxes,
+            scores=scores,
+            max_output_size=MAX_DARTS,   # limit detections (e.g., 3 darts max)
+            iou_threshold=0.3,           # discard if boxes overlap > 30%
+            score_threshold=CONFIDENCE_THRESHOLD  # minimum confidence
+        ).numpy()
 
-            ymin, xmin, ymax, xmax = box
+        results = []
+        for i in selected_indices:
+            if classes[i] != DART_CLASS_ID:
+                continue
+
+            ymin, xmin, ymax, xmax = boxes[i]
             x1, y1 = int(xmin * w_orig), int(ymin * h_orig)
             x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
 
             tip_coords = find_dart_tip(x1, y1, x2, y2, image_bgr, debug)
-            
-            # 🚀 ENHANCED: Only include darts with valid tip detection
+
             if tip_coords is not None:
                 tip_x, tip_y = tip_coords
-                results.append((x1, y1, x2, y2, score, tip_x, tip_y))
+                results.append((x1, y1, x2, y2, scores[i], tip_x, tip_y))
                 if debug:
-                    print(f"✅ Valid dart with tip: score={score:.2f}, tip=({tip_x}, {tip_y})")
+                    print(f"✅ Valid dart with tip: score={scores[i]:.2f}, tip=({tip_x}, {tip_y})")
             else:
-                # Skip darts without valid tip detection to prevent false positives
                 if debug:
-                    print(f"⚠️ Dart detected but tip not found - skipping: score={score:.2f}")
-
-        results.sort(key=lambda x: x[4], reverse=True)
-
-        # --- Remove overlapping detections (IoU filtering) ---
-        def iou(boxA, boxB):
-            # box = (x1, y1, x2, y2, score, tip_x, tip_y)
-            xA = max(boxA[0], boxB[0])
-            yA = max(boxA[1], boxB[1])
-            xB = min(boxA[2], boxB[2])  # ✅ fix
-            yB = min(boxA[3], boxB[3])  # ✅ fix
-            interW = max(0, xB - xA)
-            interH = max(0, yB - yA)
-            interArea = interW * interH
-            boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-            boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-            union = float(boxAArea + boxBArea - interArea + 1e-6)
-            return interArea / union
-
-        filtered_results = []
-        for r in results:
-            keep = True
-            for fr in filtered_results:
-                if iou(r, fr) > 0.2:  # IoU threshold (20%)
-                    keep = False
-                    break
-            if keep:
-                filtered_results.append(r)
-
-        results = filtered_results
+                    print(f"⚠️ Dart detected but tip not found - skipping: score={scores[i]:.2f}")
 
         if MAX_DARTS == 1 and results:
             return [results[0]]
@@ -219,7 +197,6 @@ def run_detector(image_bgr, debug=False):
         print(f"❌ TensorFlow detection failed: {e}")
         raise RuntimeError(f"Dart detection failed: {e}")
     finally:
-        # Force garbage collection and clear TensorFlow memory
         import gc
         gc.collect()
         tf.keras.backend.clear_session()
