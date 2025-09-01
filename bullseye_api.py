@@ -1023,28 +1023,30 @@ async def live_dart_detect(file: UploadFile = File(...)):
         
         # 🚫 DEDUPLICATION: Check if this dart is already detected
         is_duplicate = False
-        
-        # Check recent darts for duplicates (last 5 darts)
         recent_darts = dart_history[-5:] if len(dart_history) > 5 else dart_history
-        
+
         for existing_dart in recent_darts:
             existing_wx = existing_dart.get('x', 0)
             existing_wy = existing_dart.get('y', 0)
             existing_score = existing_dart.get('score', 0)
-            
-            # Calculate distance between dart positions
+
             distance = ((wx - existing_wx) ** 2 + (wy - existing_wy) ** 2) ** 0.5
-            
-            # If positions are very close (within 10 pixels) and scores are the same, it's a duplicate
+
             if distance < 10.0 and dart_score == existing_score:
                 print(f"🔄 Duplicate dart detected at position ({wx}, {wy}) with score {dart_score} - skipping")
                 is_duplicate = True
                 break
-        
-        # Skip this dart if it's a duplicate
+
         if is_duplicate:
             continue
-        
+
+        # ✅ EXTRA CHECK: Only add if it's at least 25px away from ALL recent darts
+        if len(recent_darts) > 0 and not all(
+            ((wx - d['x'])**2 + (wy - d['y'])**2)**0.5 > 25.0 for d in recent_darts
+        ):
+            print(f"⚠️ New detection too close to existing darts - skipping")
+            continue
+
         # Check if we already have too many darts in this turn (max 3)
         if len(turn_darts) >= 3:
             print(f"⚠️ Turn already has 3 darts, skipping new detection")
