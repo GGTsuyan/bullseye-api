@@ -183,9 +183,38 @@ def run_detector(image_bgr, debug=False):
                     print(f"⚠️ Dart detected but tip not found - skipping: score={score:.2f}")
 
         results.sort(key=lambda x: x[4], reverse=True)
+
+        # --- Remove overlapping detections (IoU filtering) ---
+        def iou(boxA, boxB):
+            # box = (x1, y1, x2, y2, score, tip_x, tip_y)
+            xA = max(boxA[0], boxB[0])
+            yA = max(boxA[1], boxB[1])
+            xB = min(boxA[2], boxB[2])
+            yB = min(boxA[3], boxB[1])
+            interW = max(0, xB - xA)
+            interH = max(0, yB - yA)
+            interArea = interW * interH
+            boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+            boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+            union = float(boxAArea + boxBArea - interArea + 1e-6)
+            return interArea / union
+
+        filtered_results = []
+        for r in results:
+            keep = True
+            for fr in filtered_results:
+                if iou(r, fr) > 0.3:  # IoU threshold (30%)
+                    keep = False
+                    break
+            if keep:
+                filtered_results.append(r)
+
+        results = filtered_results
+
         if MAX_DARTS == 1 and results:
             return [results[0]]
         return results
+
     except Exception as e:
         print(f"❌ TensorFlow detection failed: {e}")
         raise RuntimeError(f"Dart detection failed: {e}")
