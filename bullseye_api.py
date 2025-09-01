@@ -168,7 +168,7 @@ def run_detector(image_bgr, debug=False):
             boxes=boxes,
             scores=scores,
             max_output_size=MAX_DARTS,   # limit detections (e.g., 3 darts max)
-            iou_threshold=0.3,           # discard if boxes overlap > 30%
+            iou_threshold=0.5,           # discard if boxes overlap > 30%
             score_threshold=CONFIDENCE_THRESHOLD  # minimum confidence
         ).numpy()
 
@@ -1030,7 +1030,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
 
         for existing_dart in recent_darts:
             distance = ((wx - existing_dart['x']) ** 2 + (wy - existing_dart['y']) ** 2) ** 0.5
-            if distance < 10.0 and dart_score == existing_dart['score']:
+            if distance < 20.0 and dart_score == existing_dart['score']:  # increased from 10 → 20
                 is_duplicate = True
                 break
 
@@ -1042,9 +1042,9 @@ async def live_dart_detect(file: UploadFile = File(...)):
         for candidate in dart_candidates:
             cx, cy, cscore, frame_count = candidate
             distance = ((wx - cx) ** 2 + (wy - cy) ** 2) ** 0.5
-            if distance < 10.0 and dart_score == cscore:
+            if distance < 20.0 and dart_score == cscore:  # match threshold also 20px
                 candidate[3] += 1  # increment frame count
-                if candidate[3] >= 2:  # ✅ appears in at least 2 frames
+                if candidate[3] >= 3:  # ✅ must appear in 3 consecutive frames
                     confirmed = True
                     dart_candidates.remove(candidate)
                 break
