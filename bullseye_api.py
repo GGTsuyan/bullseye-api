@@ -96,6 +96,9 @@ last_warped_dart_img = None
 dart_history = []   # all darts across match
 turn_darts = []     # darts this turn only
 
+# Store temporary candidates before confirming them
+dart_candidates = []  # [(wx, wy, score, frame_count)]
+
 # ===============================
 # --- Game State Management
 # ===============================
@@ -1021,31 +1024,35 @@ async def live_dart_detect(file: UploadFile = File(...)):
         
         dart_score = int(last_scoring_map[wy, wx])
         
-        # 🚫 DEDUPLICATION: Check if this dart is already detected
+        # 🚫 DEDUPLICATION + TEMPORAL FILTER
         is_duplicate = False
         recent_darts = dart_history[-5:] if len(dart_history) > 5 else dart_history
 
         for existing_dart in recent_darts:
-            existing_wx = existing_dart.get('x', 0)
-            existing_wy = existing_dart.get('y', 0)
-            existing_score = existing_dart.get('score', 0)
-
-            distance = ((wx - existing_wx) ** 2 + (wy - existing_wy) ** 2) ** 0.5
-
-            if distance < 10.0 and dart_score == existing_score:
-                print(f"🔄 Duplicate dart detected at position ({wx}, {wy}) with score {dart_score} - skipping")
+            distance = ((wx - existing_dart['x']) ** 2 + (wy - existing_dart['y']) ** 2) ** 0.5
+            if distance < 10.0 and dart_score == existing_dart['score']:
                 is_duplicate = True
                 break
 
         if is_duplicate:
             continue
 
-        # ✅ EXTRA CHECK: Only add if it's at least 25px away from ALL recent darts
-        if len(recent_darts) > 0 and not all(
-            ((wx - d['x'])**2 + (wy - d['y'])**2)**0.5 > 25.0 for d in recent_darts
-        ):
-            print(f"⚠️ New detection too close to existing darts - skipping")
-            continue
+        # --- Temporal candidate filter ---
+        confirmed = False
+        for candidate in dart_candidates:
+            cx, cy, cscore, frame_count = candidate
+            distance = ((wx - cx) ** 2 + (wy - cy) ** 2) ** 0.5
+            if distance < 10.0 and dart_score == cscore:
+                candidate[3] += 1  # increment frame count
+                if candidate[3] >= 2:  # ✅ appears in at least 2 frames
+                    confirmed = True
+                    dart_candidates.remove(candidate)
+                break
+
+        if not confirmed:
+            # Add or update candidate
+            dart_candidates.append([wx, wy, dart_score, 1])
+            continue  # wait for stability before adding to history
 
         # Check if we already have too many darts in this turn (max 3)
         if len(turn_darts) >= 3:
