@@ -1120,40 +1120,36 @@ async def live_dart_detect(file: UploadFile = File(...)):
         new_darts.append(dart_entry)
         
         print(f"✅ New dart detected: {dart_score} points at position ({wx}, {wy})")
+        
+        # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic immediately
+        if current_game is not None:
+            final_score = dart_score  # This is the final score (e.g., 60 for triple 20)
+            
+            # Extract base score and multiplier from final score
+            if final_score == 50:  # Bullseye
+                base_score = 50
+                multiplier = 1
+            elif final_score == 25:  # Outer bull
+                base_score = 25
+                multiplier = 1
+            elif final_score % 3 == 0 and final_score > 0:  # Triple
+                base_score = final_score // 3
+                multiplier = 3
+            elif final_score % 2 == 0 and final_score > 0:  # Double
+                base_score = final_score // 2
+                multiplier = 2
+            else:  # Single
+                base_score = final_score
+                multiplier = 1
+            
+            # Add dart to game state immediately
+            status = current_game.add_dart(base_score, multiplier)
+            print(f"🎯 Live dart added to game: {base_score} x{multiplier} = {final_score} points, status: {status}")
     
     # Only return darts if we actually detected some
     if new_darts:
-        # Update game state for each detected dart
-        dart_statuses = []
-        if current_game:
-            for dart in new_darts:
-                final_score = dart['score']  # This is the final score (e.g., 60 for triple 20)
-                
-                # Extract base score and multiplier from final score
-                if final_score == 50:  # Bullseye
-                    base_score = 50
-                    multiplier = 1
-                elif final_score == 25:  # Outer bull
-                    base_score = 25
-                    multiplier = 1
-                elif final_score % 3 == 0 and final_score > 0:  # Triple
-                    base_score = final_score // 3
-                    multiplier = 3
-                elif final_score % 2 == 0 and final_score > 0:  # Double
-                    base_score = final_score // 2
-                    multiplier = 2
-                else:  # Single
-                    base_score = final_score
-                    multiplier = 1
-                
-                # Add dart to game state
-                status = current_game.add_dart(base_score, multiplier)
-                dart_statuses.append(status)
-                print(f"🎯 Live dart added to game: {base_score} x{multiplier} = {final_score} points, status: {status}")
-            
-            game_update = current_game.get_state()
-        else:
-            game_update = None
+        # Get current game state (darts were already added to game state above)
+        game_update = current_game.get_state() if current_game else None
         
         return {
             "status": "success",
@@ -1161,7 +1157,6 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "message": f"Detected {len(new_darts)} new dart(s)",
             "total_darts": len(dart_history),
             "turn_darts": len(turn_darts),
-            "dart_status": dart_statuses,
             "game_update": game_update
         }
     else:
