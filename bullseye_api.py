@@ -798,7 +798,17 @@ async def detect_dart(file: UploadFile = File(...)):
         warped_pt = cv2.perspectiveTransform(pt, inv_transform)[0][0]
         wx, wy = int(np.clip(warped_pt[0], 0, w - 1)), int(np.clip(warped_pt[1], 0, h - 1))
 
-        dart_score = int(last_scoring_map[wy, wx])
+        # Use proper classification to get score with multiplier
+        if last_bull_info and last_masks_dict and last_masks_rg:
+            bull_center, radius = last_bull_info
+            mask_red, mask_green = last_masks_rg
+            dart_score = classify_score_with_wedges(
+                wx, wy, bull_center[0], bull_center[1], radius,
+                last_masks_dict, last_warped_img, mask_red, mask_green
+            )
+        else:
+            # Fallback to simple scoring map
+            dart_score = int(last_scoring_map[wy, wx])
 
         dart_entry = {
             "bbox": [int(x1), int(y1), int(x2), int(y2)],
@@ -816,20 +826,28 @@ async def detect_dart(file: UploadFile = File(...)):
         
         # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic
         if current_game is not None:
-            # Determine multiplier based on dart position (simplified logic)
-            multiplier = 1  # Default to single
-            if dart_score == 50:  # Bullseye
+            final_score = dart_score  # This is the final score (e.g., 60 for triple 20)
+            
+            # Extract base score and multiplier from final score
+            if final_score == 50:  # Bullseye
+                base_score = 50
                 multiplier = 1
-            elif dart_score > 20:  # Triple ring (outer ring)
+            elif final_score == 25:  # Outer bull
+                base_score = 25
+                multiplier = 1
+            elif final_score % 3 == 0 and final_score > 0:  # Triple
+                base_score = final_score // 3
                 multiplier = 3
-            elif dart_score > 10:  # Double ring (middle ring)
+            elif final_score % 2 == 0 and final_score > 0:  # Double
+                base_score = final_score // 2
                 multiplier = 2
-            else:  # Single ring (inner ring)
+            else:  # Single
+                base_score = final_score
                 multiplier = 1
             
             # Add dart to game state
-            result = current_game.add_dart(dart_score, multiplier)
-            print(f"🎯 Dart added to game: {dart_score} x{multiplier} = {result}")
+            result = current_game.add_dart(base_score, multiplier)
+            print(f"🎯 Dart added to game: {base_score} x{multiplier} = {final_score} points, result: {result}")
 
         # --- Draw visualization on warped board ---
         cv2.circle(vis_img, (wx, wy), 8, (0, 0, 255), -1)  # red dot
@@ -1040,7 +1058,17 @@ async def live_dart_detect(file: UploadFile = File(...)):
         warped_pt = cv2.perspectiveTransform(pt, inv_transform)[0][0]
         wx, wy = int(np.clip(warped_pt[0], 0, w - 1)), int(np.clip(warped_pt[1], 0, h - 1))
         
-        dart_score = int(last_scoring_map[wy, wx])
+        # Use proper classification to get score with multiplier
+        if last_bull_info and last_masks_dict and last_masks_rg:
+            bull_center, radius = last_bull_info
+            mask_red, mask_green = last_masks_rg
+            dart_score = classify_score_with_wedges(
+                wx, wy, bull_center[0], bull_center[1], radius,
+                last_masks_dict, last_warped_img, mask_red, mask_green
+            )
+        else:
+            # Fallback to simple scoring map
+            dart_score = int(last_scoring_map[wy, wx])
         
         # 🚫 DEDUPLICATION + TEMPORAL FILTER
         is_duplicate = False
@@ -1099,22 +1127,29 @@ async def live_dart_detect(file: UploadFile = File(...)):
         dart_statuses = []
         if current_game:
             for dart in new_darts:
-                # Determine multiplier based on dart position (simplified logic)
-                multiplier = 1  # Default to single
-                dart_score = dart['score']
-                if dart_score == 50:  # Bullseye
+                final_score = dart['score']  # This is the final score (e.g., 60 for triple 20)
+                
+                # Extract base score and multiplier from final score
+                if final_score == 50:  # Bullseye
+                    base_score = 50
                     multiplier = 1
-                elif dart_score > 20:  # Triple ring (outer ring)
+                elif final_score == 25:  # Outer bull
+                    base_score = 25
+                    multiplier = 1
+                elif final_score % 3 == 0 and final_score > 0:  # Triple
+                    base_score = final_score // 3
                     multiplier = 3
-                elif dart_score > 10:  # Double ring (middle ring)
+                elif final_score % 2 == 0 and final_score > 0:  # Double
+                    base_score = final_score // 2
                     multiplier = 2
-                else:  # Single ring (inner ring)
+                else:  # Single
+                    base_score = final_score
                     multiplier = 1
                 
                 # Add dart to game state
-                status = current_game.add_dart(dart_score, multiplier)
+                status = current_game.add_dart(base_score, multiplier)
                 dart_statuses.append(status)
-                print(f"🎯 Live dart added to game: {dart_score} x{multiplier} = {status}")
+                print(f"🎯 Live dart added to game: {base_score} x{multiplier} = {final_score} points, status: {status}")
             
             game_update = current_game.get_state()
         else:
