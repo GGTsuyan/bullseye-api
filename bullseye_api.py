@@ -78,7 +78,7 @@ except Exception as e:
 
 CONFIDENCE_THRESHOLD = 0.85
 DART_CLASS_ID = 1
-MAX_DARTS = 1
+MAX_DARTS = 3
 
 LABEL_MAP = {1: "dart", 2: "dartboard"}
 
@@ -174,6 +174,25 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
 # ===============================
 # --- Dart Detector Wrapper
 # ===============================
+def deduplicate_darts(detections, min_distance=10):
+    """
+    Merge/remove detections that are too close together (likely duplicates).
+    detections: list of tuples (x1, y1, x2, y2, score, tip_x, tip_y)
+    min_distance: minimum pixel distance between unique dart tips
+    """
+    filtered = []
+    for d in detections:
+        _, _, _, _, _, tx, ty = d
+        if not any(
+            ((tx - fd[5]) ** 2 + (ty - fd[6]) ** 2) ** 0.5 < min_distance
+            for fd in filtered
+        ):
+            filtered.append(d)
+    return filtered
+
+
+import globals  # make sure this is at the top of your file
+
 def run_detector(image_bgr, debug=False):
     try:
         h_orig, w_orig, _ = image_bgr.shape
@@ -182,23 +201,22 @@ def run_detector(image_bgr, debug=False):
         input_tensor = tf.cast(input_tensor, tf.uint8)
 
         outputs = infer(input_tensor)
-        boxes = outputs["detection_boxes"][0].numpy()   # normalized [ymin, xmin, ymax, xmax]
+        boxes = outputs["detection_boxes"][0].numpy()
         scores = outputs["detection_scores"][0].numpy()
         classes = outputs["detection_classes"][0].numpy().astype(int)
 
-        # Clear input tensor to free memory
-        del input_tensor
+        del input_tensor  # free memory
 
-        # --- Apply TensorFlow Non-Max Suppression ---
+        # --- NMS ---
         selected_indices = tf.image.non_max_suppression(
             boxes=boxes,
             scores=scores,
-            max_output_size=MAX_DARTS,   # limit detections (e.g., 3 darts max)
-            iou_threshold=0.5,           # discard if boxes overlap > 30%
-            score_threshold=CONFIDENCE_THRESHOLD  # minimum confidence
+            max_output_size=MAX_DARTS,
+            iou_threshold=0.3,
+            score_threshold=CONFIDENCE_THRESHOLD
         ).numpy()
 
-        results = []
+        raw_results = []
         for i in selected_indices:
             if classes[i] != DART_CLASS_ID:
                 continue
@@ -208,19 +226,38 @@ def run_detector(image_bgr, debug=False):
             x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
 
             tip_coords = find_dart_tip(x1, y1, x2, y2, image_bgr, debug)
-
             if tip_coords is not None:
                 tip_x, tip_y = tip_coords
-                results.append((x1, y1, x2, y2, scores[i], tip_x, tip_y))
-                if debug:
-                    print(f"✅ Valid dart with tip: score={scores[i]:.2f}, tip=({tip_x}, {tip_y})")
-            else:
-                if debug:
-                    print(f"⚠️ Dart detected but tip not found - skipping: score={scores[i]:.2f}")
+                raw_results.append((x1, y1, x2, y2, scores[i], tip_x, tip_y))
 
-        if MAX_DARTS == 1 and results:
-            return [results[0]]
-        return results
+        # --- Stability filter ---
+        confirmed_darts = []
+        new_pending = []
+
+        for (x1, y1, x2, y2, score, tip_x, tip_y) in raw_results:
+            matched = False
+            for (px, py, frames_seen) in globals.pending_darts:
+                dist = ((tip_x - px) ** 2 + (tip_y - py) ** 2) ** 0.5
+                if dist < globals.DISTANCE_THRESHOLD:
+                    frames_seen += 1
+                    if frames_seen >= globals.STABILITY_FRAMES:
+                        confirmed_darts.append((x1, y1, x2, y2, score, tip_x, tip_y))
+                    else:
+                        new_pending.append((tip_x, tip_y, frames_seen))
+                    matched = True
+                    break
+
+            if not matched:
+                new_pending.append((tip_x, tip_y, 1))
+
+        # Update buffer for next frame
+        globals.pending_darts = new_pending
+
+        if debug and confirmed_darts:
+            for _, _, _, _, s, tx, ty in confirmed_darts:
+                print(f"🎯 Stable dart confirmed: score={s:.2f}, tip=({tx}, {ty})")
+
+        return confirmed_darts
 
     except Exception as e:
         print(f"❌ TensorFlow detection failed: {e}")

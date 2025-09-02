@@ -22,4 +22,12 @@ last_frame_hash: Optional[int] = None   # optional, to detect if the frame chang
 # ===============================
 last_warped_dart_img: Optional[np.ndarray] = None  # Warped dart image
 dart_history: list = []                         # All darts so far
-turn_darts: list = []               
+turn_darts: list = []      
+
+# ===============================
+# Dart Detection globals
+# ===============================
+# globals.py
+pending_darts = []   # [(tip_x, tip_y, frames_seen)]
+STABILITY_FRAMES = 2
+DISTANCE_THRESHOLD = 10
