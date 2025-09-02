@@ -1144,15 +1144,17 @@ class DartRequest(BaseModel):
     multiplier: int = 1
 
 @app.post("/process-dart")
-async def process_dart(request: DartRequest):
+async def process_dart(dart: DartRequest):
     global current_game
     if current_game is None:
         return {"status": "error", "message": "No game in progress"}
 
-    result = current_game.add_dart(request.score, request.multiplier)
+    # Example: use detected dart values
+    status = current_game.add_dart(dart.score, dart.multiplier)
+
     return {
         "status": "success",
-        "result": result,
+        "dart_status": status,
         "game_state": current_game.get_state()
     }
 
