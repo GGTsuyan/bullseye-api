@@ -1090,15 +1090,18 @@ async def live_dart_detect(file: UploadFile = File(...)):
             distance = ((wx - cx) ** 2 + (wy - cy) ** 2) ** 0.5
             if distance < 20.0 and dart_score == cscore:  # match threshold also 20px
                 candidate[3] += 1  # increment frame count
-                if candidate[3] >= 3:  # ✅ must appear in 3 consecutive frames
+                if candidate[3] >= 2:  # ✅ must appear in 2 consecutive frames
                     confirmed = True
                     dart_candidates.remove(candidate)
                 break
 
         if not confirmed:
-            # Add or update candidate
-            dart_candidates.append([wx, wy, dart_score, 1])
-            continue  # wait for stability before adding to history
+            # High confidence bypass
+            if conf > 0.85:
+                confirmed = True
+            else:
+                dart_candidates.append([wx, wy, dart_score, 1])
+                continue  # wait for stability before adding to history
 
         # Check if we already have too many darts in this turn (max 3)
         if len(turn_darts) >= 3:
