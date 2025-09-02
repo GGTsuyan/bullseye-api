@@ -1092,30 +1092,33 @@ async def live_dart_detect(file: UploadFile = File(...)):
         new_darts.append(dart_entry)
         
         print(f"✅ New dart detected: {dart_score} points at position ({wx}, {wy})")
-        
-        # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic
-        if current_game is not None:
-            # Determine multiplier based on dart position (simplified logic)
-            multiplier = 1  # Default to single
-            if dart_score == 50:  # Bullseye
-                multiplier = 1
-            elif dart_score > 20:  # Triple ring (outer ring)
-                multiplier = 3
-            elif dart_score > 10:  # Double ring (middle ring)
-                multiplier = 2
-            else:  # Single ring (inner ring)
-                multiplier = 1
-            
-            # Add dart to game state
-            result = current_game.add_dart(dart_score, multiplier)
-            print(f"🎯 Live dart added to game: {dart_score} x{multiplier} = {result}")
     
     # Only return darts if we actually detected some
     if new_darts:
-        # Get current game state if available
-        game_update = None
-        if current_game is not None:
+        # Update game state for each detected dart
+        dart_statuses = []
+        if current_game:
+            for dart in new_darts:
+                # Determine multiplier based on dart position (simplified logic)
+                multiplier = 1  # Default to single
+                dart_score = dart['score']
+                if dart_score == 50:  # Bullseye
+                    multiplier = 1
+                elif dart_score > 20:  # Triple ring (outer ring)
+                    multiplier = 3
+                elif dart_score > 10:  # Double ring (middle ring)
+                    multiplier = 2
+                else:  # Single ring (inner ring)
+                    multiplier = 1
+                
+                # Add dart to game state
+                status = current_game.add_dart(dart_score, multiplier)
+                dart_statuses.append(status)
+                print(f"🎯 Live dart added to game: {dart_score} x{multiplier} = {status}")
+            
             game_update = current_game.get_state()
+        else:
+            game_update = None
         
         return {
             "status": "success",
@@ -1123,6 +1126,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "message": f"Detected {len(new_darts)} new dart(s)",
             "total_darts": len(dart_history),
             "turn_darts": len(turn_darts),
+            "dart_status": dart_statuses,
             "game_update": game_update
         }
     else:
