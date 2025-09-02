@@ -103,10 +103,32 @@ turn_darts = []     # darts this turn only
 # Store temporary candidates before confirming them
 dart_candidates = []  # [(wx, wy, score, frame_count)]
 
+# Store dartboard scores for quick lookup
+last_dartboard_scores = {}  # {(wx, wy): score}
+
 # ===============================
 # --- Game State Management
 # ===============================
 current_game: GameState = None
+
+# ===============================
+# --- Helper Functions
+# ===============================
+def is_valid_board_location(wx, wy, bull_info, warp_size):
+    """Check if coordinates are within valid dartboard area."""
+    if not bull_info or not warp_size:
+        return False
+    
+    bull_center, radius = bull_info
+    h, w = warp_size
+    
+    # Check if within image bounds
+    if wx < 0 or wx >= w or wy < 0 or wy >= h:
+        return False
+    
+    # Check if within dartboard radius (with some margin)
+    distance_from_center = ((wx - bull_center[0]) ** 2 + (wy - bull_center[1]) ** 2) ** 0.5
+    return distance_from_center <= radius * 1.1  # 10% margin
 
 # ===============================
 # --- Dart Tip Finder
@@ -1026,7 +1048,7 @@ async def stop_live_tracking():
 async def live_dart_detect(file: UploadFile = File(...)):
     """Process a frame for live dart detection."""
     global dart_history, turn_darts, current_game, last_transform, last_warp_size, last_scoring_map
-    global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg
+    global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg, last_dartboard_scores
     
     if last_transform is None:
         return JSONResponse({"error": "Board not initialized"}, status_code=400)
@@ -1052,6 +1074,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
     # Invert the homography: image → warped board
     inv_transform = np.linalg.inv(last_transform)
     
+    # Build detection list with warped coordinates
+    detections_warped = []
     for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
         # Project tip into warped coordinates
         pt = np.array([[[tip_x, tip_y]]], dtype="float32")
@@ -1070,63 +1094,104 @@ async def live_dart_detect(file: UploadFile = File(...)):
             # Fallback to simple scoring map
             dart_score = int(last_scoring_map[wy, wx])
         
-        # 🚫 DEDUPLICATION + TEMPORAL FILTER
-        is_duplicate = False
-        recent_darts = dart_history[-5:] if len(dart_history) > 5 else dart_history
+        # Store in dartboard scores for quick lookup
+        last_dartboard_scores[(wx, wy)] = dart_score
+        
+        detections_warped.append((dart_score, conf, wx, wy))
+    
+    # ---------------------------------------
+    # Deduplicate & confirm new darts
+    # ---------------------------------------
+    confirmed_darts = []
+    for det in detections_warped:
+        cls, conf, wx, wy = det
+        dart_score = last_dartboard_scores.get((wx, wy), 0)
 
+        if dart_score <= 0:
+            continue
+
+        is_duplicate = False
+        confirmed = False
+
+        # 1. Compare against dart history (already locked-in darts)
+        recent_darts = dart_history[-5:] if len(dart_history) > 5 else dart_history
         for existing_dart in recent_darts:
-            distance = ((wx - existing_dart['x']) ** 2 + (wy - existing_dart['y']) ** 2) ** 0.5
-            if distance < 20.0 and dart_score == existing_dart['score']:  # increased from 10 → 20
+            existing_wx = existing_dart.get('x', 0)
+            existing_wy = existing_dart.get('y', 0)
+            existing_score = existing_dart.get('score', 0)
+
+            distance = ((wx - existing_wx) ** 2 + (wy - existing_wy) ** 2) ** 0.5
+
+            # Rule A: If extremely close (<10px), always same dart (ignore new one)
+            if distance < 10.0:
+                print("⚠️ Detected near-identical dart → ignoring as duplicate")
+                is_duplicate = True
+                break
+
+            # Rule B: If close (<15px) AND score matches, treat as same
+            if distance < 15.0 and dart_score == existing_score:
                 is_duplicate = True
                 break
 
         if is_duplicate:
             continue
 
-        # --- Temporal candidate filter ---
-        confirmed = False
+        # 2. Temporal confirmation (require stability over 3 frames)
+        match_found = False
         for candidate in dart_candidates:
-            cx, cy, cscore, frame_count = candidate
-            distance = ((wx - cx) ** 2 + (wy - cy) ** 2) ** 0.5
-            if distance < 20.0 and dart_score == cscore:  # match threshold also 20px
-                candidate[3] += 1  # increment frame count
-                if candidate[3] >= 2:  # ✅ must appear in 2 consecutive frames
+            cx, cy, cscore, count = candidate
+            dist = ((wx - cx) ** 2 + (wy - cy) ** 2) ** 0.5
+            if dist < 15.0 and dart_score == cscore:
+                candidate[3] += 1
+                match_found = True
+                if candidate[3] >= 3:  # require 3 confirmations
                     confirmed = True
                     dart_candidates.remove(candidate)
                 break
 
-        if not confirmed:
-            # High confidence bypass
-            if conf > 0.85:
-                confirmed = True
-            else:
-                dart_candidates.append([wx, wy, dart_score, 1])
-                continue  # wait for stability before adding to history
+        if not match_found:
+            dart_candidates.append([wx, wy, dart_score, 1])
 
+        # 3. High-confidence fast confirm, but only if on valid board
+        if conf > 0.90 and is_valid_board_location(wx, wy, last_bull_info, last_warp_size):
+            confirmed = True
+
+        # 4. Add confirmed dart
+        if confirmed:
+            dart_info = {
+                "x": wx,
+                "y": wy,
+                "score": dart_score,
+                "conf": float(conf)
+            }
+            confirmed_darts.append(dart_info)
+            dart_history.append(dart_info)
+            dart_history = dart_history[-50:]
+            print(f"✅ New dart detected: {dart_score} points at position ({wx}, {wy})")
+    
+    # Process confirmed darts
+    for dart_info in confirmed_darts:
         # Check if we already have too many darts in this turn (max 3)
         if len(turn_darts) >= 3:
             print(f"⚠️ Turn already has 3 darts, skipping new detection")
             continue
         
         dart_entry = {
-            "bbox": [int(x1), int(y1), int(x2), int(y2)],
-            "confidence": float(conf),
-            "tip": [int(tip_x), int(tip_y)],
-            "tip_warped": [wx, wy],
-            "x": wx,
-            "y": wy,
-            "score": dart_score
+            "bbox": [0, 0, 0, 0],  # Not available in new format
+            "confidence": dart_info["conf"],
+            "tip": [0, 0],  # Not available in new format
+            "tip_warped": [dart_info["x"], dart_info["y"]],
+            "x": dart_info["x"],
+            "y": dart_info["y"],
+            "score": dart_info["score"]
         }
         
-        dart_history.append(dart_entry)
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
         
-        print(f"✅ New dart detected: {dart_score} points at position ({wx}, {wy})")
-        
         # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic immediately
         if current_game is not None:
-            final_score = dart_score  # This is the final score (e.g., 60 for triple 20)
+            final_score = dart_info["score"]  # This is the final score (e.g., 60 for triple 20)
             
             # Extract base score and multiplier from final score
             if final_score == 50:  # Bullseye
