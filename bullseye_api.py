@@ -846,12 +846,18 @@ async def detect_dart(file: UploadFile = File(...)):
     _, buf = cv2.imencode(".png", vis_img)
     img_b64 = base64.b64encode(buf).decode("utf-8")
 
+    # Get current game state if available
+    game_update = None
+    if current_game is not None:
+        game_update = current_game.get_state()
+
     return {
         "new_darts": new_darts,
         "turn_darts": turn_darts,
         "all_darts": dart_history,
         "turn_total": int(sum(d["score"] for d in turn_darts)),
-        "visualization": img_b64
+        "visualization": img_b64,
+        "game_state": game_update
     }
 
 
@@ -906,7 +912,15 @@ async def reset_turn():
         current_game.end_turn(force=True)
         print("🔄 Turn reset in game state")
     
-    return {"status": "turn reset"}
+    # Get current game state if available
+    game_state = None
+    if current_game is not None:
+        game_state = current_game.get_state()
+    
+    return {
+        "status": "turn reset",
+        "game_state": game_state
+    }
 
 @app.get("/debug-visual")
 async def debug_visual():
