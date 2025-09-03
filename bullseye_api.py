@@ -76,7 +76,7 @@ except Exception as e:
     print("❌ Please ensure the model files exist and TensorFlow is properly installed")
     raise RuntimeError(f"TensorFlow model loading failed: {e}")
 
-CONFIDENCE_THRESHOLD = 0.85
+CONFIDENCE_THRESHOLD = 0.75
 DART_CLASS_ID = 1
 MAX_DARTS = 3
 
