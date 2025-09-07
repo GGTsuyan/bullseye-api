@@ -70,13 +70,15 @@ try:
     print("🔧 TensorFlow configured for CPU-only usage")
     print("💾 Memory optimization applied for Render deployment")
     print("🧠 Memory limit: 60% of available RAM (1.2GB)")
+    print(f"🔧 Detection parameters: CONFIDENCE_THRESHOLD={CONFIDENCE_THRESHOLD}, DART_CLASS_ID={DART_CLASS_ID}, MAX_DARTS={MAX_DARTS}")
+    print(f"🔧 Stability parameters: STABILITY_FRAMES={globals.STABILITY_FRAMES}, DISTANCE_THRESHOLD={globals.DISTANCE_THRESHOLD}")
 except Exception as e:
     print(f"❌ Failed to load TensorFlow model: {e}")
     print(f"❌ Model path: {MODEL_DIR}")
     print("❌ Please ensure the model files exist and TensorFlow is properly installed")
     raise RuntimeError(f"TensorFlow model loading failed: {e}")
 
-CONFIDENCE_THRESHOLD = 0.75
+CONFIDENCE_THRESHOLD = 0.3  # Temporarily lowered for debugging
 DART_CLASS_ID = 1
 MAX_DARTS = 3
 
@@ -196,14 +198,21 @@ import globals  # make sure this is at the top of your file
 def run_detector(image_bgr, debug=False):
     try:
         h_orig, w_orig, _ = image_bgr.shape
+        print(f"🔍 DETECTION DEBUG: Input image shape: {image_bgr.shape}")
         image_resized = cv2.resize(image_bgr, (640, 640))
         input_tensor = tf.convert_to_tensor(image_resized)[tf.newaxis, ...]
         input_tensor = tf.cast(input_tensor, tf.uint8)
 
+        print(f"🔍 DETECTION DEBUG: Running TensorFlow inference...")
         outputs = infer(input_tensor)
         boxes = outputs["detection_boxes"][0].numpy()
         scores = outputs["detection_scores"][0].numpy()
         classes = outputs["detection_classes"][0].numpy().astype(int)
+
+        print(f"🔍 DETECTION DEBUG: Raw detections - boxes: {len(boxes)}, scores: {len(scores)}, classes: {len(classes)}")
+        print(f"🔍 DETECTION DEBUG: Max score: {np.max(scores):.3f}, Min score: {np.min(scores):.3f}")
+        print(f"🔍 DETECTION DEBUG: Classes found: {np.unique(classes)}")
+        print(f"🔍 DETECTION DEBUG: Confidence threshold: {CONFIDENCE_THRESHOLD}")
 
         del input_tensor  # free memory
 
@@ -216,9 +225,14 @@ def run_detector(image_bgr, debug=False):
             score_threshold=CONFIDENCE_THRESHOLD
         ).numpy()
 
+        print(f"🔍 DETECTION DEBUG: After NMS - selected indices: {len(selected_indices)}")
+        print(f"🔍 DETECTION DEBUG: Selected indices: {selected_indices}")
+
         raw_results = []
         for i in selected_indices:
+            print(f"🔍 DETECTION DEBUG: Processing detection {i} - class: {classes[i]}, score: {scores[i]:.3f}")
             if classes[i] != DART_CLASS_ID:
+                print(f"🔍 DETECTION DEBUG: Skipping detection {i} - wrong class (expected {DART_CLASS_ID}, got {classes[i]})")
                 continue
 
             ymin, xmin, ymax, xmax = boxes[i]
@@ -256,6 +270,16 @@ def run_detector(image_bgr, debug=False):
         if debug and confirmed_darts:
             for _, _, _, _, s, tx, ty in confirmed_darts:
                 print(f"🎯 Stable dart confirmed: score={s:.2f}, tip=({tx}, {ty})")
+
+        print(f"🔍 DETECTION DEBUG: Final result - {len(confirmed_darts)} confirmed darts")
+        if confirmed_darts:
+            for i, (x1, y1, x2, y2, score, tip_x, tip_y) in enumerate(confirmed_darts):
+                print(f"🔍 DETECTION DEBUG: Dart {i+1}: bbox=({x1}, {y1}, {x2}, {y2}), tip=({tip_x}, {tip_y}), score={score:.3f}")
+        else:
+            print(f"🔍 DETECTION DEBUG: No confirmed darts - possible reasons:")
+            print(f"🔍 DETECTION DEBUG: - Confidence threshold too high ({CONFIDENCE_THRESHOLD})")
+            print(f"🔍 DETECTION DEBUG: - No dart class detections (looking for class {DART_CLASS_ID})")
+            print(f"🔍 DETECTION DEBUG: - Stability filtering too strict")
 
         return confirmed_darts
 
@@ -1106,7 +1130,10 @@ async def live_dart_detect(file: UploadFile = File(...)):
     
     # Step 1: Continuous frame monitoring - check if there's a new dart in the dartboard using TensorFlow
     print("🎯 TENSORFLOW CHECK: Detecting darts in original frame...")
-    detections = run_detector(image, debug=False)
+    print(f"🎯 TENSORFLOW CHECK: Image shape: {image.shape}, dtype: {image.dtype}")
+    print(f"🎯 TENSORFLOW CHECK: Image min/max values: {np.min(image)}/{np.max(image)}")
+    
+    detections = run_detector(image, debug=True)  # Enable debug for more info
     print(f"🎯 TENSORFLOW CHECK: Found {len(detections) if detections else 0} darts in original frame")
     
     # Always generate original frame image with dart detection for Dart Analyzer
