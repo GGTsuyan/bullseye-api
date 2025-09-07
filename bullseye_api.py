@@ -70,8 +70,6 @@ try:
     print("🔧 TensorFlow configured for CPU-only usage")
     print("💾 Memory optimization applied for Render deployment")
     print("🧠 Memory limit: 60% of available RAM (1.2GB)")
-    print(f"🔧 Detection parameters: CONFIDENCE_THRESHOLD={CONFIDENCE_THRESHOLD}, DART_CLASS_ID={DART_CLASS_ID}, MAX_DARTS={MAX_DARTS}")
-    print(f"🔧 Stability parameters: STABILITY_FRAMES={globals.STABILITY_FRAMES}, DISTANCE_THRESHOLD={globals.DISTANCE_THRESHOLD}")
 except Exception as e:
     print(f"❌ Failed to load TensorFlow model: {e}")
     print(f"❌ Model path: {MODEL_DIR}")
@@ -83,6 +81,10 @@ DART_CLASS_ID = 1
 MAX_DARTS = 3
 
 LABEL_MAP = {1: "dart", 2: "dartboard"}
+
+# Print detection parameters after they're defined
+print(f"🔧 Detection parameters: CONFIDENCE_THRESHOLD={CONFIDENCE_THRESHOLD}, DART_CLASS_ID={DART_CLASS_ID}, MAX_DARTS={MAX_DARTS}")
+print(f"🔧 Stability parameters: STABILITY_FRAMES={globals.STABILITY_FRAMES}, DISTANCE_THRESHOLD={globals.DISTANCE_THRESHOLD}")
 
 
 
