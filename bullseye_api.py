@@ -1181,7 +1181,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
             mask_red, mask_green = last_masks_rg
             dart_score = classify_score_with_wedges(
                 wx, wy, bull_center[0], bull_center[1], radius,
-                last_warped_img, mask_red, mask_green
+                last_masks_dict, last_warped_img, mask_red, mask_green
             )
         else:
             # Fallback to simple scoring map
