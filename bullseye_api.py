@@ -1356,7 +1356,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
         h, w = dartboard_with_boxes.shape[:2]
         
         for i, detection in enumerate(detections):
-            x1, y1, x2, y2, conf = detection
+            x1, y1, x2, y2, conf, tip_x, tip_y = detection
             
             # Handle bounding box coordinates based on detection type
             if detections_processed and len(detections_processed) > 0:
