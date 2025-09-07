@@ -1087,10 +1087,11 @@ async def live_dart_detect(file: UploadFile = File(...)):
     Continuous frame monitoring for live dart detection.
     
     Flow:
-    1. Monitor continuous frames for new dart detection
-    2. If new dart detected, process image to scoring region
-    3. Detect dart in processed scoring region for precise scoring
-    4. Score dart in warped image
+    1. Monitor continuous frames to see if there is a new dart in the dartboard
+    2. If there is, send it as an image for it to be processed
+    3. Process the image to get warped scoring region
+    4. Detect dart in processed scoring region for precise scoring
+    5. Score the dart in the warped image
     """
     global dart_history, turn_darts, current_game, last_transform, last_warp_size, last_scoring_map
     global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg, last_dartboard_scores
@@ -1103,14 +1104,14 @@ async def live_dart_detect(file: UploadFile = File(...)):
     npimg = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
     
-    # Step 1: Continuous frame monitoring - detect if there's a new dart in original frame
-    print("🎯 Continuous frame monitoring - checking for new dart...")
+    # Step 1: Continuous frame monitoring - check if there's a new dart in the dartboard
+    print("🎯 Continuous frame monitoring - checking for new dart in dartboard...")
     detections = run_detector(image, debug=False)
     if not detections:
-        print("🎯 No new dart detected in frame, returning minimal response")
+        print("🎯 No new dart detected in dartboard, returning minimal response")
         return {
             "status": "no_darts",
-            "message": "No new dart detected in frame",
+            "message": "No new dart detected in dartboard",
             "darts": [],
             "all_darts": dart_history,
             "total_darts": len(dart_history),
@@ -1118,10 +1119,10 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "game_update": current_game.get_state() if current_game else None
         }
     
-    # Step 2: New dart detected - process image to scoring region
-    print("🎯 New dart detected! Processing image to scoring region...")
+    # Step 2: New dart detected - send image for processing to scoring region
+    print("🎯 New dart detected in dartboard! Sending image for processing...")
     
-    # Get the warped scoring region (this is the processed dartboard)
+    # Process the image to get the warped scoring region
     warped_scoring_region = last_warped_img.copy() if last_warped_img is not None else None
     if warped_scoring_region is None:
         print("❌ No warped scoring region available - board not initialized")
@@ -1410,7 +1411,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
     game_update = current_game.get_state() if current_game else None
     
     response_data = {
-        "status": "success" if confirmed_darts else "no_new_darts",
+        "status": "success" if confirmed_darts else "no_darts",
         "darts": confirmed_darts,  # Only new darts
         "all_darts": dart_history,  # Include all darts for display
         "message": f"Detected {len(confirmed_darts)} new dart(s), {len(dart_history)} total" if confirmed_darts else f"No new darts, {len(dart_history)} total",
@@ -1766,6 +1767,10 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
         # First, we need to detect the bullseye center
         bull_center, radius = detect_bullseye(coarse_crop)
         
+        # Define the standard dartboard scoring order
+        scores_order = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17,
+                       3, 19, 7, 16, 8, 11, 14, 9, 12, 5]
+        
         if bull_center is not None:
             # Convert bull_center to original image coordinates
             if coarse_box is not None:
@@ -1865,7 +1870,7 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
                 "board_radius": radius_orig,
                 "confidence": float(conf),
                 "detection_method": "tensorflow + scoring_zone_boundary",
-                "scoring_zones_detected": len(scores_order) if 'scores_order' in locals() else 0,
+                "scoring_zones_detected": len(scores_order),
                 "stability_metrics": {
                     "camera_stable": True,
                     "red_coverage": float(red_coverage),
