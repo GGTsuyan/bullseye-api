@@ -76,7 +76,7 @@ except Exception as e:
     print("❌ Please ensure the model files exist and TensorFlow is properly installed")
     raise RuntimeError(f"TensorFlow model loading failed: {e}")
 
-CONFIDENCE_THRESHOLD = 0.75
+CONFIDENCE_THRESHOLD = 0.5
 DART_CLASS_ID = 1
 MAX_DARTS = 3
 
@@ -1083,7 +1083,15 @@ async def stop_live_tracking():
 
 @app.post("/live-dart-detect")
 async def live_dart_detect(file: UploadFile = File(...)):
-    """Process a frame for live dart detection."""
+    """
+    Continuous frame monitoring for live dart detection.
+    
+    Flow:
+    1. Monitor continuous frames for new dart detection
+    2. If new dart detected, process image to scoring region
+    3. Detect dart in processed scoring region for precise scoring
+    4. Score dart in warped image
+    """
     global dart_history, turn_darts, current_game, last_transform, last_warp_size, last_scoring_map
     global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg, last_dartboard_scores
     global last_warped_dart_img
@@ -1095,8 +1103,23 @@ async def live_dart_detect(file: UploadFile = File(...)):
     npimg = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
     
-    # First, process the image to get the warped scoring region
-    print("🎯 Processing image to get warped scoring region...")
+    # Step 1: Continuous frame monitoring - detect if there's a new dart in original frame
+    print("🎯 Continuous frame monitoring - checking for new dart...")
+    detections = run_detector(image, debug=False)
+    if not detections:
+        print("🎯 No new dart detected in frame, returning minimal response")
+        return {
+            "status": "no_darts",
+            "message": "No new dart detected in frame",
+            "darts": [],
+            "all_darts": dart_history,
+            "total_darts": len(dart_history),
+            "turn_darts": len(turn_darts),
+            "game_update": current_game.get_state() if current_game else None
+        }
+    
+    # Step 2: New dart detected - process image to scoring region
+    print("🎯 New dart detected! Processing image to scoring region...")
     
     # Get the warped scoring region (this is the processed dartboard)
     warped_scoring_region = last_warped_img.copy() if last_warped_img is not None else None
@@ -1112,36 +1135,47 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "game_update": current_game.get_state() if current_game else None
         }
     
-    # Detect darts in the PROCESSED scoring region (not original frame)
-    print("🎯 Detecting darts in processed scoring region...")
-    detections = run_detector(warped_scoring_region, debug=False)
-    if not detections:
-        print("🎯 No darts detected in processed scoring region, returning minimal response")
-        return {
-            "status": "no_darts",
-            "message": "No darts detected in processed scoring region",
-            "darts": [],
-            "all_darts": dart_history,
-            "total_darts": len(dart_history),
-            "turn_darts": len(turn_darts),
-            "game_update": current_game.get_state() if current_game else None
-        }
+    # Step 3: Detect dart in processed scoring region for precise scoring
+    print("🎯 Detecting dart in processed scoring region for precise scoring...")
+    detections_processed = run_detector(warped_scoring_region, debug=False)
+    if not detections_processed:
+        print("🎯 No dart detected in processed scoring region, using original detections")
+        # Fallback to original detections if processed detection fails
+        detections = detections
+    else:
+        print("🎯 Using processed detections for precise scoring")
+        detections = detections_processed
     
-    # Process detections with deduplication (darts already in scoring region coordinates)
+    # Step 4: Process detections and score dart in warped image
     new_darts = []
     h, w = last_warp_size
     
-    # Build detection list (darts are already in warped coordinates)
+    # Build detection list - handle both original and processed detections
     detections_warped = []
     for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
-        # Darts are already in scoring region coordinates, no transformation needed
-        wx, wy = int(tip_x), int(tip_y)
+        # Check if we're using processed detections (already in scoring region) or original detections
+        if detections_processed and len(detections_processed) > 0:
+            # Using processed detections - already in scoring region coordinates
+            wx, wy = int(tip_x), int(tip_y)
+            print(f"🎯 Using processed detection: tip=({wx}, {wy}), conf={conf:.2f}")
+        else:
+            # Using original detections - need to transform to scoring region
+            if last_transform is not None:
+                # Transform tip coordinates from original to scoring region
+                pt = np.array([[[tip_x, tip_y]]], dtype="float32")
+                inv_transform = np.linalg.inv(last_transform)
+                warped_pt = cv2.perspectiveTransform(pt, inv_transform)[0][0]
+                wx, wy = int(np.clip(warped_pt[0], 0, w - 1)), int(np.clip(warped_pt[1], 0, h - 1))
+                print(f"🎯 Transformed original detection: tip=({tip_x}, {tip_y}) → ({wx}, {wy}), conf={conf:.2f}")
+            else:
+                print("❌ No transform available for coordinate conversion")
+                continue
         
         # Ensure coordinates are within bounds
         wx = max(0, min(wx, w - 1))
         wy = max(0, min(wy, h - 1))
         
-        # Use proper classification to get score with multiplier
+        # Step 5: Score dart in warped image using proper classification
         if last_bull_info and last_masks_dict and last_masks_rg:
             bull_center, radius = last_bull_info
             mask_red, mask_green = last_masks_rg
@@ -1157,7 +1191,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
         last_dartboard_scores[(wx, wy)] = dart_score
         
         detections_warped.append((dart_score, conf, wx, wy))
-        print(f"🎯 Dart detected in scoring region: tip=({wx}, {wy}), score={dart_score}, conf={conf:.2f}")
+        print(f"🎯 Dart scored in warped image: tip=({wx}, {wy}), score={dart_score}, conf={conf:.2f}")
     
     # ---------------------------------------
     # Deduplicate & confirm new darts
@@ -1323,12 +1357,33 @@ async def live_dart_detect(file: UploadFile = File(...)):
         
         for i, detection in enumerate(detections):
             x1, y1, x2, y2, conf = detection
-            # Darts are already in scoring region coordinates, no transformation needed
-            # Ensure coordinates are within bounds
-            min_x = max(0, min(int(x1), w-1))
-            min_y = max(0, min(int(y1), h-1))
-            max_x = max(0, min(int(x2), w-1))
-            max_y = max(0, min(int(y2), h-1))
+            
+            # Handle bounding box coordinates based on detection type
+            if detections_processed and len(detections_processed) > 0:
+                # Using processed detections - already in scoring region coordinates
+                min_x = max(0, min(int(x1), w-1))
+                min_y = max(0, min(int(y1), h-1))
+                max_x = max(0, min(int(x2), w-1))
+                max_y = max(0, min(int(y2), h-1))
+                print(f"🎯 Using processed bounding box: ({min_x}, {min_y}) to ({max_x}, {max_y})")
+            else:
+                # Using original detections - need to transform bounding box coordinates
+                if last_transform is not None:
+                    # Transform bounding box corners to warped coordinates
+                    inv_transform = np.linalg.inv(last_transform)
+                    corners = np.array([[[x1, y1]], [[x2, y1]], [[x2, y2]], [[x1, y2]]], dtype="float32")
+                    warped_corners = cv2.perspectiveTransform(corners, inv_transform)
+                    
+                    # Get the bounding rectangle of the transformed corners
+                    warped_corners_flat = warped_corners.reshape(-1, 2)
+                    min_x = int(np.clip(np.min(warped_corners_flat[:, 0]), 0, w-1))
+                    min_y = int(np.clip(np.min(warped_corners_flat[:, 1]), 0, h-1))
+                    max_x = int(np.clip(np.max(warped_corners_flat[:, 0]), 0, w-1))
+                    max_y = int(np.clip(np.max(warped_corners_flat[:, 1]), 0, h-1))
+                    print(f"🎯 Transformed bounding box: ({x1}, {y1}) to ({x2}, {y2}) → ({min_x}, {min_y}) to ({max_x}, {max_y})")
+                else:
+                    print("❌ No transform available for bounding box conversion")
+                    continue
             
             # Draw bounding box on processed dartboard
             cv2.rectangle(dartboard_with_boxes, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
