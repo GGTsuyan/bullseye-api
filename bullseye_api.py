@@ -1167,8 +1167,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
         }
         
         # Add clean dartboard image even when no darts detected
-        if vis_img is not None:
-            _, buf = cv2.imencode(".png", vis_img)
+        if last_warped_img is not None:
+            _, buf = cv2.imencode(".png", last_warped_img)
             clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
             response_data["dartboard_visualization"] = clean_dartboard_b64
             print(f"🎯 Added clean dartboard to no-darts response (size: {len(clean_dartboard_b64)} chars)")
@@ -1439,8 +1439,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
     else:
         print(f"❌ DART ANALYZER: No processed dartboard available - this should not happen!")
         # Force generate a clean dartboard image
-        if vis_img is not None:
-            _, buf = cv2.imencode(".png", vis_img)
+        if last_warped_img is not None:
+            _, buf = cv2.imencode(".png", last_warped_img)
             clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
             response_data["dartboard_visualization"] = clean_dartboard_b64
             print(f"🎯 DART ANALYZER: Generated fallback clean dartboard (size: {len(clean_dartboard_b64)} chars)")
