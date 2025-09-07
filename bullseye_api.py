@@ -1095,30 +1095,51 @@ async def live_dart_detect(file: UploadFile = File(...)):
     npimg = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
     
-    # Detect darts using existing detection logic
-    detections = run_detector(image, debug=False)  # Can be enabled for debugging
-    if not detections:
+    # First, process the image to get the warped scoring region
+    print("🎯 Processing image to get warped scoring region...")
+    
+    # Get the warped scoring region (this is the processed dartboard)
+    warped_scoring_region = last_warped_img.copy() if last_warped_img is not None else None
+    if warped_scoring_region is None:
+        print("❌ No warped scoring region available - board not initialized")
         return {
-            "status": "no_darts",
-            "message": "No darts detected in frame",
+            "status": "error",
+            "message": "Board not initialized - no warped scoring region available",
             "darts": [],
-            "game_update": None
+            "all_darts": dart_history,
+            "total_darts": len(dart_history),
+            "turn_darts": len(turn_darts),
+            "game_update": current_game.get_state() if current_game else None
         }
     
-    # Process detections with deduplication
+    # Detect darts in the PROCESSED scoring region (not original frame)
+    print("🎯 Detecting darts in processed scoring region...")
+    detections = run_detector(warped_scoring_region, debug=False)
+    if not detections:
+        print("🎯 No darts detected in processed scoring region, returning minimal response")
+        return {
+            "status": "no_darts",
+            "message": "No darts detected in processed scoring region",
+            "darts": [],
+            "all_darts": dart_history,
+            "total_darts": len(dart_history),
+            "turn_darts": len(turn_darts),
+            "game_update": current_game.get_state() if current_game else None
+        }
+    
+    # Process detections with deduplication (darts already in scoring region coordinates)
     new_darts = []
     h, w = last_warp_size
     
-    # Invert the homography: image → warped board
-    inv_transform = np.linalg.inv(last_transform)
-    
-    # Build detection list with warped coordinates
+    # Build detection list (darts are already in warped coordinates)
     detections_warped = []
     for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
-        # Project tip into warped coordinates
-        pt = np.array([[[tip_x, tip_y]]], dtype="float32")
-        warped_pt = cv2.perspectiveTransform(pt, inv_transform)[0][0]
-        wx, wy = int(np.clip(warped_pt[0], 0, w - 1)), int(np.clip(warped_pt[1], 0, h - 1))
+        # Darts are already in scoring region coordinates, no transformation needed
+        wx, wy = int(tip_x), int(tip_y)
+        
+        # Ensure coordinates are within bounds
+        wx = max(0, min(wx, w - 1))
+        wy = max(0, min(wy, h - 1))
         
         # Use proper classification to get score with multiplier
         if last_bull_info and last_masks_dict and last_masks_rg:
@@ -1126,7 +1147,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
             mask_red, mask_green = last_masks_rg
             dart_score = classify_score_with_wedges(
                 wx, wy, bull_center[0], bull_center[1], radius,
-                last_masks_dict, last_warped_img, mask_red, mask_green
+                last_warped_img, mask_red, mask_green
             )
         else:
             # Fallback to simple scoring map
@@ -1136,6 +1157,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
         last_dartboard_scores[(wx, wy)] = dart_score
         
         detections_warped.append((dart_score, conf, wx, wy))
+        print(f"🎯 Dart detected in scoring region: tip=({wx}, {wy}), score={dart_score}, conf={conf:.2f}")
     
     # ---------------------------------------
     # Deduplicate & confirm new darts
@@ -1205,10 +1227,32 @@ async def live_dart_detect(file: UploadFile = File(...)):
             confirmed_darts.append(dart_info)
             dart_history.append(dart_info)
             dart_history = dart_history[-50:]
-            print(f"✅ New dart detected: {dart_score} points at position ({wx}, {wy})")
+            print(f"✅ New dart detected in scoring region: {dart_score} points at position ({wx}, {wy})")
+    
+    # Always return dartboard visualization, even if no new darts
+    print("🎯 Processing response - new darts: {}, total darts: {}".format(len(confirmed_darts), len(dart_history)))
     
     # Work on a copy of the clean warped board for visualization
     vis_img = last_warped_img.copy() if last_warped_img is not None else None
+    
+    # Draw ALL darts from dart history on the visualization (not just new ones)
+    if vis_img is not None:
+        if dart_history:
+            print(f"🎯 Drawing {len(dart_history)} darts from history on visualization")
+            for i, dart in enumerate(dart_history):
+                if 'x' in dart and 'y' in dart and 'score' in dart:
+                    wx, wy = dart['x'], dart['y']
+                    dart_score = dart['score']
+                    print(f"🎯 Drawing dart {i+1}: score={dart_score} at ({wx}, {wy})")
+                    cv2.circle(vis_img, (wx, wy), 8, (0, 0, 255), -1)  # red dot
+                    cv2.putText(
+                        vis_img, str(dart_score),
+                        (wx + 10, wy - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 255, 0), 2
+                    )
+        else:
+            print(f"🎯 No darts in history, showing clean board")
     
     # Process confirmed darts
     for dart_info in confirmed_darts:
@@ -1271,40 +1315,70 @@ async def live_dart_detect(file: UploadFile = File(...)):
     if vis_img is not None:
         last_warped_dart_img = vis_img.copy()
     
-    # Encode visualization to base64 if we have new darts
-    img_b64 = None
-    if new_darts and vis_img is not None:
-        _, buf = cv2.imencode(".png", vis_img)
-        img_b64 = base64.b64encode(buf).decode("utf-8")
+    # Draw bounding boxes around detected darts in the processed dartboard image
+    dartboard_with_boxes = vis_img.copy() if vis_img is not None else None
+    if dartboard_with_boxes is not None and detections:
+        print(f"🎯 Drawing bounding boxes around {len(detections)} detected darts on processed dartboard")
+        h, w = dartboard_with_boxes.shape[:2]
+        
+        for i, detection in enumerate(detections):
+            x1, y1, x2, y2, conf = detection
+            # Darts are already in scoring region coordinates, no transformation needed
+            # Ensure coordinates are within bounds
+            min_x = max(0, min(int(x1), w-1))
+            min_y = max(0, min(int(y1), h-1))
+            max_x = max(0, min(int(x2), w-1))
+            max_y = max(0, min(int(y2), h-1))
+            
+            # Draw bounding box on processed dartboard
+            cv2.rectangle(dartboard_with_boxes, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
+            # Draw confidence score
+            cv2.putText(dartboard_with_boxes, f"{conf:.2f}", (min_x, min_y - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            print(f"🎯 Drew bounding box {i+1} on dartboard: ({min_x}, {min_y}) to ({max_x}, {max_y}) with confidence {conf:.2f}")
     
-    # Only return darts if we actually detected some
-    if new_darts:
-        # Get current game state (darts were already added to game state above)
-        game_update = current_game.get_state() if current_game else None
-        
-        response_data = {
-            "status": "success",
-            "darts": new_darts,
-            "message": f"Detected {len(new_darts)} new dart(s)",
-            "total_darts": len(dart_history),
-            "turn_darts": len(turn_darts),
-            "game_update": game_update
-        }
-        
-        # Add visualization if available
-        if img_b64 is not None:
-            response_data["visualization"] = img_b64
-        
-        return response_data
+    # Encode processed dartboard image with dart bounding boxes to base64
+    processed_dartboard_b64 = None
+    if dartboard_with_boxes is not None:
+        _, buf = cv2.imencode(".png", dartboard_with_boxes)
+        processed_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
+        print(f"🎯 Generated processed dartboard with dart bounding boxes, size: {len(processed_dartboard_b64)} chars")
+    
+    # Also encode processed dartboard visualization for reference (always show board)
+    dartboard_b64 = None
+    if vis_img is not None:
+        _, buf = cv2.imencode(".png", vis_img)
+        dartboard_b64 = base64.b64encode(buf).decode("utf-8")
+        print(f"🎯 Generated dartboard visualization with {len(dart_history)} darts, size: {len(dartboard_b64)} chars")
+    
+    # Return response with dart data and images
+    game_update = current_game.get_state() if current_game else None
+    
+    response_data = {
+        "status": "success" if confirmed_darts else "no_new_darts",
+        "darts": confirmed_darts,  # Only new darts
+        "all_darts": dart_history,  # Include all darts for display
+        "message": f"Detected {len(confirmed_darts)} new dart(s), {len(dart_history)} total" if confirmed_darts else f"No new darts, {len(dart_history)} total",
+        "total_darts": len(dart_history),
+        "turn_darts": len(turn_darts),
+        "game_update": game_update
+    }
+    
+    # Add processed dartboard with dart bounding boxes (main image for dart analyzer)
+    if processed_dartboard_b64 is not None:
+        response_data["dartboard_visualization"] = processed_dartboard_b64
+        print(f"🎯 Added processed dartboard with bounding boxes to response")
     else:
-        return {
-            "status": "no_darts",
-            "message": "No new darts detected",
-            "darts": [],
-            "total_darts": len(dart_history),
-            "turn_darts": len(turn_darts),
-            "game_update": None
-        }
+        print(f"❌ No processed dartboard with bounding boxes available")
+    
+    # Add original frame image as fallback (shows actual dart in camera frame)
+    if image is not None:
+        _, buf = cv2.imencode(".png", image)
+        original_frame_b64 = base64.b64encode(buf).decode("utf-8")
+        response_data["frame_image"] = original_frame_b64
+        print(f"🎯 Added original frame image as fallback")
+    
+    return response_data
 
 class GameStartRequest(BaseModel):
     mode: str = "501"
