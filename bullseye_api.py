@@ -1152,10 +1152,10 @@ async def live_dart_detect(file: UploadFile = File(...)):
             print(f"🎯 DART ANALYZER: Drew dart {i+1} on original frame: ({x1}, {y1}) to ({x2}, {y2}) with confidence {conf:.2f}")
     
     if not detections:
-        print("🎯 No new dart detected in dartboard, returning minimal response")
+        print("🎯 No dart detected in original frame - take another frame")
         response_data = {
             "status": "no_darts",
-            "message": "No new dart detected in dartboard",
+            "message": "No dart detected in original frame - take another frame",
             "darts": [],
             "all_darts": dart_history,
             "total_darts": len(dart_history),
@@ -1178,8 +1178,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
         
         return response_data
     
-    # Step 2: New dart detected - process the original frame with dart to get warped dartboard
-    print("🎯 New dart detected in dartboard! Processing original frame with dart...")
+    # Step 2: Dart detected in original frame - process it to get warped dartboard with dart
+    print("🎯 Dart detected in original frame! Processing frame with dart...")
     
     # Process the original frame (with dart) to get the warped dartboard
     if last_transform is not None and last_warp_size is not None:
@@ -1209,8 +1209,19 @@ async def live_dart_detect(file: UploadFile = File(...)):
     print(f"🎯 Processed frame size: {warped_scoring_region.shape}")
     
     # Detect dart directly in the processed frame using TensorFlow
+    print(f"🎯 PROCESSED FRAME DEBUG: Image shape: {warped_scoring_region.shape}")
+    print(f"🎯 PROCESSED FRAME DEBUG: Image dtype: {warped_scoring_region.dtype}")
+    print(f"🎯 PROCESSED FRAME DEBUG: Image min/max: {np.min(warped_scoring_region)}/{np.max(warped_scoring_region)}")
+    
     detections_processed = run_detector(warped_scoring_region, debug=True)
     print(f"🎯 Processed frame detections: {len(detections_processed) if detections_processed else 0} darts found")
+    
+    if not detections_processed:
+        print("🎯 PROCESSED FRAME DEBUG: No dart detected in processed frame - possible reasons:")
+        print("🎯 PROCESSED FRAME DEBUG: 1. Dart too small in processed frame")
+        print("🎯 PROCESSED FRAME DEBUG: 2. Confidence threshold too high")
+        print("🎯 PROCESSED FRAME DEBUG: 3. Model trained on original frames, not processed")
+        print("🎯 PROCESSED FRAME DEBUG: 4. Image quality issues in processed frame")
     
     if not detections_processed:
         print("🎯 No dart detected in processed frame")
