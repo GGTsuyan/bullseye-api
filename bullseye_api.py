@@ -1086,6 +1086,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
     """Process a frame for live dart detection."""
     global dart_history, turn_darts, current_game, last_transform, last_warp_size, last_scoring_map
     global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg, last_dartboard_scores
+    global last_warped_dart_img
     
     if last_transform is None:
         return JSONResponse({"error": "Board not initialized"}, status_code=400)
@@ -1206,6 +1207,9 @@ async def live_dart_detect(file: UploadFile = File(...)):
             dart_history = dart_history[-50:]
             print(f"✅ New dart detected: {dart_score} points at position ({wx}, {wy})")
     
+    # Work on a copy of the clean warped board for visualization
+    vis_img = last_warped_img.copy() if last_warped_img is not None else None
+    
     # Process confirmed darts
     for dart_info in confirmed_darts:
         # Check if we already have too many darts in this turn (max 3)
@@ -1225,6 +1229,18 @@ async def live_dart_detect(file: UploadFile = File(...)):
         
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
+        
+        # --- Draw visualization on warped board ---
+        if vis_img is not None:
+            wx, wy = dart_info["x"], dart_info["y"]
+            dart_score = dart_info["score"]
+            cv2.circle(vis_img, (wx, wy), 8, (0, 0, 255), -1)  # red dot
+            cv2.putText(
+                vis_img, str(dart_score),
+                (wx + 10, wy - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                (0, 255, 0), 2
+            )
         
         # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic immediately
         if current_game is not None:
@@ -1251,12 +1267,22 @@ async def live_dart_detect(file: UploadFile = File(...)):
             status = current_game.add_dart(base_score, multiplier)
             print(f"🎯 Live dart added to game: {base_score} x{multiplier} = {final_score} points, status: {status}")
     
+    # Update the global warped dart image for visualization
+    if vis_img is not None:
+        last_warped_dart_img = vis_img.copy()
+    
+    # Encode visualization to base64 if we have new darts
+    img_b64 = None
+    if new_darts and vis_img is not None:
+        _, buf = cv2.imencode(".png", vis_img)
+        img_b64 = base64.b64encode(buf).decode("utf-8")
+    
     # Only return darts if we actually detected some
     if new_darts:
         # Get current game state (darts were already added to game state above)
         game_update = current_game.get_state() if current_game else None
         
-        return {
+        response_data = {
             "status": "success",
             "darts": new_darts,
             "message": f"Detected {len(new_darts)} new dart(s)",
@@ -1264,6 +1290,12 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "turn_darts": len(turn_darts),
             "game_update": game_update
         }
+        
+        # Add visualization if available
+        if img_b64 is not None:
+            response_data["visualization"] = img_b64
+        
+        return response_data
     else:
         return {
             "status": "no_darts",
