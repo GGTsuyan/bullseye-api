@@ -1109,7 +1109,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
     detections = run_detector(image, debug=False)
     if not detections:
         print("🎯 No new dart detected in dartboard, returning minimal response")
-        return {
+        response_data = {
             "status": "no_darts",
             "message": "No new dart detected in dartboard",
             "darts": [],
@@ -1118,6 +1118,15 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "turn_darts": len(turn_darts),
             "game_update": current_game.get_state() if current_game else None
         }
+        
+        # Add clean dartboard image even when no darts detected
+        if last_warped_img is not None:
+            _, buf = cv2.imencode(".png", last_warped_img)
+            clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
+            response_data["dartboard_visualization"] = clean_dartboard_b64
+            print(f"🎯 Added clean dartboard to initial no-darts response (size: {len(clean_dartboard_b64)} chars)")
+        
+        return response_data
     
     # Step 2: New dart detected - send image for processing to scoring region
     print("🎯 New dart detected in dartboard! Sending image for processing...")
@@ -1140,9 +1149,27 @@ async def live_dart_detect(file: UploadFile = File(...)):
     print("🎯 Detecting dart in processed scoring region for precise scoring...")
     detections_processed = run_detector(warped_scoring_region, debug=False)
     if not detections_processed:
-        print("🎯 No dart detected in processed scoring region, using original detections")
-        # Fallback to original detections if processed detection fails
-        detections = detections
+        print("🎯 No dart detected in processed scoring region - returning no darts")
+        # CRITICAL: Only return darts if they are detected in the processed image
+        # But still return the clean dartboard image
+        response_data = {
+            "status": "no_darts",
+            "message": "No dart detected in processed scoring region",
+            "darts": [],
+            "all_darts": dart_history,
+            "total_darts": len(dart_history),
+            "turn_darts": len(turn_darts),
+            "game_update": current_game.get_state() if current_game else None
+        }
+        
+        # Add clean dartboard image even when no darts detected
+        if vis_img is not None:
+            _, buf = cv2.imencode(".png", vis_img)
+            clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
+            response_data["dartboard_visualization"] = clean_dartboard_b64
+            print(f"🎯 Added clean dartboard to no-darts response (size: {len(clean_dartboard_b64)} chars)")
+        
+        return response_data
     else:
         print("🎯 Using processed detections for precise scoring")
         detections = detections_processed
@@ -1151,26 +1178,12 @@ async def live_dart_detect(file: UploadFile = File(...)):
     new_darts = []
     h, w = last_warp_size
     
-    # Build detection list - handle both original and processed detections
+    # Build detection list - using only processed detections (already in scoring region coordinates)
     detections_warped = []
     for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
-        # Check if we're using processed detections (already in scoring region) or original detections
-        if detections_processed and len(detections_processed) > 0:
-            # Using processed detections - already in scoring region coordinates
-            wx, wy = int(tip_x), int(tip_y)
-            print(f"🎯 Using processed detection: tip=({wx}, {wy}), conf={conf:.2f}")
-        else:
-            # Using original detections - need to transform to scoring region
-            if last_transform is not None:
-                # Transform tip coordinates from original to scoring region
-                pt = np.array([[[tip_x, tip_y]]], dtype="float32")
-                inv_transform = np.linalg.inv(last_transform)
-                warped_pt = cv2.perspectiveTransform(pt, inv_transform)[0][0]
-                wx, wy = int(np.clip(warped_pt[0], 0, w - 1)), int(np.clip(warped_pt[1], 0, h - 1))
-                print(f"🎯 Transformed original detection: tip=({tip_x}, {tip_y}) → ({wx}, {wy}), conf={conf:.2f}")
-            else:
-                print("❌ No transform available for coordinate conversion")
-                continue
+        # Using processed detections - already in scoring region coordinates
+        wx, wy = int(tip_x), int(tip_y)
+        print(f"🎯 Using processed detection: tip=({wx}, {wy}), conf={conf:.2f}")
         
         # Ensure coordinates are within bounds
         wx = max(0, min(wx, w - 1))
@@ -1359,32 +1372,12 @@ async def live_dart_detect(file: UploadFile = File(...)):
         for i, detection in enumerate(detections):
             x1, y1, x2, y2, conf, tip_x, tip_y = detection
             
-            # Handle bounding box coordinates based on detection type
-            if detections_processed and len(detections_processed) > 0:
-                # Using processed detections - already in scoring region coordinates
-                min_x = max(0, min(int(x1), w-1))
-                min_y = max(0, min(int(y1), h-1))
-                max_x = max(0, min(int(x2), w-1))
-                max_y = max(0, min(int(y2), h-1))
-                print(f"🎯 Using processed bounding box: ({min_x}, {min_y}) to ({max_x}, {max_y})")
-            else:
-                # Using original detections - need to transform bounding box coordinates
-                if last_transform is not None:
-                    # Transform bounding box corners to warped coordinates
-                    inv_transform = np.linalg.inv(last_transform)
-                    corners = np.array([[[x1, y1]], [[x2, y1]], [[x2, y2]], [[x1, y2]]], dtype="float32")
-                    warped_corners = cv2.perspectiveTransform(corners, inv_transform)
-                    
-                    # Get the bounding rectangle of the transformed corners
-                    warped_corners_flat = warped_corners.reshape(-1, 2)
-                    min_x = int(np.clip(np.min(warped_corners_flat[:, 0]), 0, w-1))
-                    min_y = int(np.clip(np.min(warped_corners_flat[:, 1]), 0, h-1))
-                    max_x = int(np.clip(np.max(warped_corners_flat[:, 0]), 0, w-1))
-                    max_y = int(np.clip(np.max(warped_corners_flat[:, 1]), 0, h-1))
-                    print(f"🎯 Transformed bounding box: ({x1}, {y1}) to ({x2}, {y2}) → ({min_x}, {min_y}) to ({max_x}, {max_y})")
-                else:
-                    print("❌ No transform available for bounding box conversion")
-                    continue
+            # Using processed detections - already in scoring region coordinates
+            min_x = max(0, min(int(x1), w-1))
+            min_y = max(0, min(int(y1), h-1))
+            max_x = max(0, min(int(x2), w-1))
+            max_y = max(0, min(int(y2), h-1))
+            print(f"🎯 Using processed bounding box: ({min_x}, {min_y}) to ({max_x}, {max_y})")
             
             # Draw bounding box on processed dartboard
             cv2.rectangle(dartboard_with_boxes, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
@@ -1428,9 +1421,15 @@ async def live_dart_detect(file: UploadFile = File(...)):
     # Add processed dartboard with dart bounding boxes (ONLY accurate image for dart analyzer)
     if processed_dartboard_b64 is not None:
         response_data["dartboard_visualization"] = processed_dartboard_b64
-        print(f"🎯 Added processed dartboard to response")
+        print(f"🎯 Added processed dartboard to response (size: {len(processed_dartboard_b64)} chars)")
     else:
-        print(f"❌ No processed dartboard available")
+        print(f"❌ No processed dartboard available - this should not happen!")
+        # Force generate a clean dartboard image
+        if vis_img is not None:
+            _, buf = cv2.imencode(".png", vis_img)
+            clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
+            response_data["dartboard_visualization"] = clean_dartboard_b64
+            print(f"🎯 Generated fallback clean dartboard (size: {len(clean_dartboard_b64)} chars)")
     
     # DO NOT add original frame image - it's not accurate for scoring
     # Only return the processed dartboard image with dart positions
