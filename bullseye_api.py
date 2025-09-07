@@ -1372,39 +1372,42 @@ async def live_dart_detect(file: UploadFile = File(...)):
     
     # Draw bounding boxes around detected darts in the processed dartboard image
     dartboard_with_boxes = vis_img.copy() if vis_img is not None else None
-    if dartboard_with_boxes is not None and detections:
-        print(f"🎯 ACCURACY: Drawing bounding boxes around {len(detections)} detected darts on processed dartboard")
-        h, w = dartboard_with_boxes.shape[:2]
-        print(f"🎯 ACCURACY: Dartboard dimensions: {w}x{h}")
-        
-        for i, detection in enumerate(detections):
-            x1, y1, x2, y2, conf, tip_x, tip_y = detection
+    if dartboard_with_boxes is not None:
+        if detections:
+            print(f"🎯 DART ANALYZER: Drawing bounding boxes around {len(detections)} detected darts on processed dartboard")
+            h, w = dartboard_with_boxes.shape[:2]
+            print(f"🎯 DART ANALYZER: Dartboard dimensions: {w}x{h}")
             
-            # Using processed detections - already in scoring region coordinates
-            min_x = max(0, min(int(x1), w-1))
-            min_y = max(0, min(int(y1), h-1))
-            max_x = max(0, min(int(x2), w-1))
-            max_y = max(0, min(int(y2), h-1))
-            print(f"🎯 ACCURACY: Dart {i+1} - Processed bbox: ({min_x}, {min_y}) to ({max_x}, {max_y})")
-            
-            # Draw bounding box on processed dartboard
-            cv2.rectangle(dartboard_with_boxes, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
-            # Draw confidence score
-            cv2.putText(dartboard_with_boxes, f"{conf:.2f}", (min_x, min_y - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            print(f"🎯 ACCURACY: Drew bounding box {i+1} on processed dartboard: ({min_x}, {min_y}) to ({max_x}, {max_y}) with confidence {conf:.2f}")
+            for i, detection in enumerate(detections):
+                x1, y1, x2, y2, conf, tip_x, tip_y = detection
+                
+                # Using processed detections - already in scoring region coordinates
+                min_x = max(0, min(int(x1), w-1))
+                min_y = max(0, min(int(y1), h-1))
+                max_x = max(0, min(int(x2), w-1))
+                max_y = max(0, min(int(y2), h-1))
+                print(f"🎯 DART ANALYZER: Dart {i+1} - Processed bbox: ({min_x}, {min_y}) to ({max_x}, {max_y})")
+                
+                # Draw bounding box on processed dartboard
+                cv2.rectangle(dartboard_with_boxes, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
+                # Draw confidence score
+                cv2.putText(dartboard_with_boxes, f"{conf:.2f}", (min_x, min_y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                print(f"🎯 DART ANALYZER: Drew bounding box {i+1} on processed dartboard: ({min_x}, {min_y}) to ({max_x}, {max_y}) with confidence {conf:.2f}")
+        else:
+            print(f"🎯 DART ANALYZER: No darts detected - dartboard_with_boxes will show clean dartboard")
     
     # Encode processed dartboard image with dart bounding boxes to base64
     processed_dartboard_b64 = None
     if dartboard_with_boxes is not None:
         _, buf = cv2.imencode(".png", dartboard_with_boxes)
         processed_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
-        print(f"🎯 Generated processed dartboard with dart bounding boxes, size: {len(processed_dartboard_b64)} chars")
+        print(f"🎯 DART ANALYZER: Generated processed dartboard WITH dart bounding boxes, size: {len(processed_dartboard_b64)} chars")
     elif vis_img is not None:
         # Fallback to clean dartboard if no dart bounding boxes
         _, buf = cv2.imencode(".png", vis_img)
         processed_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
-        print(f"🎯 Generated clean dartboard (no darts detected), size: {len(processed_dartboard_b64)} chars")
+        print(f"🎯 DART ANALYZER: Generated clean dartboard (no darts detected), size: {len(processed_dartboard_b64)} chars")
     
     # Also encode processed dartboard visualization for reference (always show board)
     dartboard_b64 = None
@@ -1429,15 +1432,18 @@ async def live_dart_detect(file: UploadFile = File(...)):
     # Add processed dartboard with dart bounding boxes (ONLY accurate image for dart analyzer)
     if processed_dartboard_b64 is not None:
         response_data["dartboard_visualization"] = processed_dartboard_b64
-        print(f"🎯 Added processed dartboard to response (size: {len(processed_dartboard_b64)} chars)")
+        if detections:
+            print(f"🎯 DART ANALYZER: Sending processed dartboard WITH dart bounding boxes (size: {len(processed_dartboard_b64)} chars)")
+        else:
+            print(f"🎯 DART ANALYZER: Sending clean processed dartboard (no darts) (size: {len(processed_dartboard_b64)} chars)")
     else:
-        print(f"❌ No processed dartboard available - this should not happen!")
+        print(f"❌ DART ANALYZER: No processed dartboard available - this should not happen!")
         # Force generate a clean dartboard image
         if vis_img is not None:
             _, buf = cv2.imencode(".png", vis_img)
             clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
             response_data["dartboard_visualization"] = clean_dartboard_b64
-            print(f"🎯 Generated fallback clean dartboard (size: {len(clean_dartboard_b64)} chars)")
+            print(f"🎯 DART ANALYZER: Generated fallback clean dartboard (size: {len(clean_dartboard_b64)} chars)")
     
     # DO NOT add original frame image - it's not accurate for scoring
     # Only return the processed dartboard image with dart positions
