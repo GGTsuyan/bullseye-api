@@ -1147,9 +1147,13 @@ async def live_dart_detect(file: UploadFile = File(...)):
     
     # Step 3: Detect dart in processed scoring region for precise scoring
     print("🎯 Detecting dart in processed scoring region for precise scoring...")
+    print(f"🎯 Processed dartboard size: {warped_scoring_region.shape if warped_scoring_region is not None else 'None'}")
     detections_processed = run_detector(warped_scoring_region, debug=False)
+    print(f"🎯 Processed detections found: {len(detections_processed) if detections_processed else 0}")
+    
     if not detections_processed:
         print("🎯 No dart detected in processed scoring region - returning no darts")
+        print("🎯 ACCURACY: Only using processed dartboard coordinates for scoring")
         # CRITICAL: Only return darts if they are detected in the processed image
         # But still return the clean dartboard image
         response_data = {
@@ -1171,7 +1175,8 @@ async def live_dart_detect(file: UploadFile = File(...)):
         
         return response_data
     else:
-        print("🎯 Using processed detections for precise scoring")
+        print("🎯 ACCURACY: Using processed detections for precise scoring")
+        print(f"🎯 Processed detections: {len(detections_processed)} darts found in warped dartboard")
         detections = detections_processed
     
     # Step 4: Process detections and score dart in warped image
@@ -1180,14 +1185,16 @@ async def live_dart_detect(file: UploadFile = File(...)):
     
     # Build detection list - using only processed detections (already in scoring region coordinates)
     detections_warped = []
-    for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
+    print(f"🎯 ACCURACY: Processing {len(detections)} darts from processed dartboard coordinates")
+    for i, (x1, y1, x2, y2, conf, tip_x, tip_y) in enumerate(detections):
         # Using processed detections - already in scoring region coordinates
         wx, wy = int(tip_x), int(tip_y)
-        print(f"🎯 Using processed detection: tip=({wx}, {wy}), conf={conf:.2f}")
+        print(f"🎯 ACCURACY: Dart {i+1} - Processed coordinates: tip=({wx}, {wy}), bbox=({x1}, {y1}, {x2}, {y2}), conf={conf:.2f}")
         
         # Ensure coordinates are within bounds
         wx = max(0, min(wx, w - 1))
         wy = max(0, min(wy, h - 1))
+        print(f"🎯 ACCURACY: Dart {i+1} - Clamped coordinates: tip=({wx}, {wy})")
         
         # Step 5: Score dart in warped image using proper classification
         if last_bull_info and last_masks_dict and last_masks_rg:
@@ -1366,8 +1373,9 @@ async def live_dart_detect(file: UploadFile = File(...)):
     # Draw bounding boxes around detected darts in the processed dartboard image
     dartboard_with_boxes = vis_img.copy() if vis_img is not None else None
     if dartboard_with_boxes is not None and detections:
-        print(f"🎯 Drawing bounding boxes around {len(detections)} detected darts on processed dartboard")
+        print(f"🎯 ACCURACY: Drawing bounding boxes around {len(detections)} detected darts on processed dartboard")
         h, w = dartboard_with_boxes.shape[:2]
+        print(f"🎯 ACCURACY: Dartboard dimensions: {w}x{h}")
         
         for i, detection in enumerate(detections):
             x1, y1, x2, y2, conf, tip_x, tip_y = detection
@@ -1377,14 +1385,14 @@ async def live_dart_detect(file: UploadFile = File(...)):
             min_y = max(0, min(int(y1), h-1))
             max_x = max(0, min(int(x2), w-1))
             max_y = max(0, min(int(y2), h-1))
-            print(f"🎯 Using processed bounding box: ({min_x}, {min_y}) to ({max_x}, {max_y})")
+            print(f"🎯 ACCURACY: Dart {i+1} - Processed bbox: ({min_x}, {min_y}) to ({max_x}, {max_y})")
             
             # Draw bounding box on processed dartboard
             cv2.rectangle(dartboard_with_boxes, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
             # Draw confidence score
             cv2.putText(dartboard_with_boxes, f"{conf:.2f}", (min_x, min_y - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            print(f"🎯 Drew bounding box {i+1} on dartboard: ({min_x}, {min_y}) to ({max_x}, {max_y}) with confidence {conf:.2f}")
+            print(f"🎯 ACCURACY: Drew bounding box {i+1} on processed dartboard: ({min_x}, {min_y}) to ({max_x}, {max_y}) with confidence {conf:.2f}")
     
     # Encode processed dartboard image with dart bounding boxes to base64
     processed_dartboard_b64 = None
