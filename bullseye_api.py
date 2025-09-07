@@ -1399,6 +1399,11 @@ async def live_dart_detect(file: UploadFile = File(...)):
         _, buf = cv2.imencode(".png", dartboard_with_boxes)
         processed_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
         print(f"🎯 Generated processed dartboard with dart bounding boxes, size: {len(processed_dartboard_b64)} chars")
+    elif vis_img is not None:
+        # Fallback to clean dartboard if no dart bounding boxes
+        _, buf = cv2.imencode(".png", vis_img)
+        processed_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
+        print(f"🎯 Generated clean dartboard (no darts detected), size: {len(processed_dartboard_b64)} chars")
     
     # Also encode processed dartboard visualization for reference (always show board)
     dartboard_b64 = None
@@ -1420,19 +1425,15 @@ async def live_dart_detect(file: UploadFile = File(...)):
         "game_update": game_update
     }
     
-    # Add processed dartboard with dart bounding boxes (main image for dart analyzer)
+    # Add processed dartboard with dart bounding boxes (ONLY accurate image for dart analyzer)
     if processed_dartboard_b64 is not None:
         response_data["dartboard_visualization"] = processed_dartboard_b64
-        print(f"🎯 Added processed dartboard with bounding boxes to response")
+        print(f"🎯 Added processed dartboard to response")
     else:
-        print(f"❌ No processed dartboard with bounding boxes available")
+        print(f"❌ No processed dartboard available")
     
-    # Add original frame image as fallback (shows actual dart in camera frame)
-    if image is not None:
-        _, buf = cv2.imencode(".png", image)
-        original_frame_b64 = base64.b64encode(buf).decode("utf-8")
-        response_data["frame_image"] = original_frame_b64
-        print(f"🎯 Added original frame image as fallback")
+    # DO NOT add original frame image - it's not accurate for scoring
+    # Only return the processed dartboard image with dart positions
     
     return response_data
 
