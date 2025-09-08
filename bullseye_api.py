@@ -246,28 +246,27 @@ def run_detector(image_bgr, debug=False):
                 tip_x, tip_y = tip_coords
                 raw_results.append((x1, y1, x2, y2, scores[i], tip_x, tip_y))
 
-        # --- Stability filter ---
-        confirmed_darts = []
-        new_pending = []
-
-        for (x1, y1, x2, y2, score, tip_x, tip_y) in raw_results:
-            matched = False
-            for (px, py, frames_seen) in globals.pending_darts:
-                dist = ((tip_x - px) ** 2 + (tip_y - py) ** 2) ** 0.5
-                if dist < globals.DISTANCE_THRESHOLD:
-                    frames_seen += 1
-                    if frames_seen >= globals.STABILITY_FRAMES:
-                        confirmed_darts.append((x1, y1, x2, y2, score, tip_x, tip_y))
-                    else:
-                        new_pending.append((tip_x, tip_y, frames_seen))
-                    matched = True
-                    break
-
-            if not matched:
-                new_pending.append((tip_x, tip_y, 1))
-
-        # Update buffer for next frame
-        globals.pending_darts = new_pending
+        # --- Stability filter (temporarily disabled for debugging) ---
+        confirmed_darts = raw_results.copy()  # Use all detected darts immediately
+        
+        # Keep the old stability filter code commented for reference
+        # confirmed_darts = []
+        # new_pending = []
+        # for (x1, y1, x2, y2, score, tip_x, tip_y) in raw_results:
+        #     matched = False
+        #     for (px, py, frames_seen) in globals.pending_darts:
+        #         dist = ((tip_x - px) ** 2 + (tip_y - py) ** 2) ** 0.5
+        #         if dist < globals.DISTANCE_THRESHOLD:
+        #             frames_seen += 1
+        #             if frames_seen >= globals.STABILITY_FRAMES:
+        #                 confirmed_darts.append((x1, y1, x2, y2, score, tip_x, tip_y))
+        #             else:
+        #                 new_pending.append((tip_x, tip_y, frames_seen))
+        #             matched = True
+        #             break
+        #     if not matched:
+        #         new_pending.append((tip_x, tip_y, 1))
+        # globals.pending_darts = new_pending
 
         if debug and confirmed_darts:
             for _, _, _, _, s, tx, ty in confirmed_darts:
