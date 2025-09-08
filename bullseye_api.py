@@ -12,20 +12,15 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 tf.config.set_visible_devices([], 'GPU')
 
 # Memory optimization for Render deployment (2GB RAM available)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Reduce TensorFlow logging to errors only
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'false'
-os.environ['TF_MEMORY_ALLOCATION'] = '0.5'  # Use 50% of available memory (1GB) - more conservative
-os.environ['OMP_NUM_THREADS'] = '1'  # Single thread for 1 CPU to prevent memory fragmentation
+os.environ['TF_MEMORY_ALLOCATION'] = '0.6'  # Use 60% of available memory (1.2GB)
+os.environ['OMP_NUM_THREADS'] = '2'  # Allow 2 threads for 1 CPU
 os.environ['TF_CPP_VMODULE'] = 'tensorflow=0'  # Disable verbose logging
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable Intel optimizations
 os.environ['TF_ENABLE_MKL_NATIVE_FORMAT'] = '0'  # Disable MKL optimizations
 os.environ['TF_USE_CUDNN'] = '0'  # Disable cuDNN
 os.environ['TF_USE_CUDA'] = '0'  # Disable CUDA
-os.environ['TF_DISABLE_MKL'] = '1'  # Disable MKL completely
-os.environ['TF_DISABLE_POOL_ALLOCATOR'] = '1'  # Disable pool allocator to prevent memory leaks
-os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'  # Optimize GPU thread mode
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'  # Allow memory growth to prevent OOM
-os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'  # Use async allocator if available
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
@@ -46,49 +41,35 @@ from game_logic import GameState
 MODEL_DIR = "models/saved_model"  # Updated path to your model location
 
 try:
-    # Enhanced memory optimization for Render deployment
-    import gc
-    import psutil
-    
-    # Get current memory usage
-    memory_info = psutil.virtual_memory()
-    print(f"💾 Available memory before model loading: {memory_info.available / (1024**3):.2f} GB")
-    
-    # Configure TensorFlow for optimal memory usage
-    tf.config.set_soft_device_placement(True)  # Allow soft device placement
-    tf.config.threading.set_inter_op_parallelism_threads(1)  # Limit inter-op threads
-    tf.config.threading.set_intra_op_parallelism_threads(1)  # Limit intra-op threads
-    
-    # Set memory growth for all devices
+    # Memory optimization: load model with memory limits
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, False)
+
+    # Set memory limits before loading
     try:
-        physical_devices = tf.config.list_physical_devices()
-        for device in physical_devices:
-            tf.config.experimental.set_memory_growth(device, True)
-    except Exception as e:
-        print(f"⚠️ Could not set memory growth: {e}")
+        cpu_devices = tf.config.list_physical_devices('CPU')
+        if cpu_devices:
+            tf.config.experimental.set_memory_growth(cpu_devices[0], False)
+    except:
+        pass
 
     # Load model with memory optimization
-    print("🔄 Loading TensorFlow model...")
     model = tf.saved_model.load(MODEL_DIR)
     infer = model.signatures["serving_default"]
 
-    # Clear any unnecessary variables immediately
+    # Clear any unnecessary variables
     tf.keras.backend.clear_session()
-    
-    # Force garbage collection multiple times
-    for _ in range(3):
-        gc.collect()
-    
-    # Get memory usage after model loading
-    memory_info_after = psutil.virtual_memory()
-    print(f"💾 Available memory after model loading: {memory_info_after.available / (1024**3):.2f} GB")
-    print(f"💾 Memory used by model: {(memory_info.available - memory_info_after.available) / (1024**3):.2f} GB")
+
+    # Force garbage collection
+    import gc
+    gc.collect()
 
     print("✅ TensorFlow model loaded successfully from", MODEL_DIR)
     print("🔧 TensorFlow configured for CPU-only usage")
     print("💾 Memory optimization applied for Render deployment")
-    print("🧠 Memory limit: 50% of available RAM (1GB) - conservative approach")
-    
+    print("🧠 Memory limit: 60% of available RAM (1.2GB)")
 except Exception as e:
     print(f"❌ Failed to load TensorFlow model: {e}")
     print(f"❌ Model path: {MODEL_DIR}")
@@ -220,18 +201,12 @@ def run_detector(image_bgr, debug=False):
     try:
         h_orig, w_orig, _ = image_bgr.shape
         print(f"🔍 DETECTION DEBUG: Input image shape: {image_bgr.shape}")
-        
-        # Memory-efficient image resizing
         image_resized = cv2.resize(image_bgr, (640, 640))
-        
-        # Convert to tensor with memory optimization
-        input_tensor = tf.convert_to_tensor(image_resized, dtype=tf.uint8)
-        input_tensor = tf.expand_dims(input_tensor, 0)  # Add batch dimension
+        input_tensor = tf.convert_to_tensor(image_resized)[tf.newaxis, ...]
+        input_tensor = tf.cast(input_tensor, tf.uint8)
 
         print(f"🔍 DETECTION DEBUG: Running TensorFlow inference...")
         outputs = infer(input_tensor)
-        
-        # Extract results and convert to numpy immediately
         boxes = outputs["detection_boxes"][0].numpy()
         scores = outputs["detection_scores"][0].numpy()
         classes = outputs["detection_classes"][0].numpy().astype(int)
@@ -241,11 +216,7 @@ def run_detector(image_bgr, debug=False):
         print(f"🔍 DETECTION DEBUG: Classes found: {np.unique(classes)}")
         print(f"🔍 DETECTION DEBUG: Confidence threshold: {CONFIDENCE_THRESHOLD}")
 
-        # Free memory immediately
-        del input_tensor
-        del outputs
-        import gc
-        gc.collect()
+        del input_tensor  # free memory
 
         # --- NMS ---
         selected_indices = tf.image.non_max_suppression(
@@ -323,13 +294,9 @@ def run_detector(image_bgr, debug=False):
         print(f"❌ TensorFlow detection failed: {e}")
         raise RuntimeError(f"Dart detection failed: {e}")
     finally:
-        # Enhanced memory cleanup
         import gc
         gc.collect()
         tf.keras.backend.clear_session()
-        # Force garbage collection multiple times
-        for _ in range(2):
-            gc.collect()
 
 def get_red_mask(hsv):
     """Binary mask for red regions (covers hue wrap-around)."""
@@ -737,64 +704,56 @@ def make_color_masks(warped_img):
 
     return mask_red, mask_green
 def process_dartboard(image):
-    # Memory-efficient dartboard processing
-    import gc
-    
-    try:
-        coarse_crop, coarse_box, conf = detect_dartboard_tf(image)
-        method = "tf"
-        if coarse_crop is None:
-            coarse_crop, coarse_box, conf = detect_dartboard_hsv(image)
-            method = "hsv_bbox" if coarse_crop is not None else None
-        if coarse_crop is None:
-            return None, None, None, None, None, None, None, None, None, None
+    coarse_crop, coarse_box, conf = detect_dartboard_tf(image)
+    method = "tf"
+    if coarse_crop is None:
+        coarse_crop, coarse_box, conf = detect_dartboard_hsv(image)
+        method = "hsv_bbox" if coarse_crop is not None else None
+    if coarse_crop is None:
+        return None, None, None, None, None, None, None, None, None, None
 
-        warped, _, ellipse, M_crop2warp = warp_to_scoring_region(coarse_crop, size=640)
+    warped, _, ellipse, M_crop2warp = warp_to_scoring_region(coarse_crop, size=640)
 
-        if warped is not None:
-            scoring_img = warped
-            scoring_method = f"{method}+double_ring_warp"
+    if warped is not None:
+        scoring_img = warped
+        scoring_method = f"{method}+double_ring_warp"
+        center_hint = (scoring_img.shape[1]//2, scoring_img.shape[0]//2)
+    else:
+        scoring_img = coarse_crop.copy()
+        scoring_method = f"{method}_no_scoring_warp"
+        if ellipse is not None:
+            center_hint = (int(ellipse[0][0]), int(ellipse[0][1]))
+        else:
             center_hint = (scoring_img.shape[1]//2, scoring_img.shape[0]//2)
-        else:
-            scoring_img = coarse_crop.copy()
-            scoring_method = f"{method}_no_scoring_warp"
-            if ellipse is not None:
-                center_hint = (int(ellipse[0][0]), int(ellipse[0][1]))
-            else:
-                center_hint = (scoring_img.shape[1]//2, scoring_img.shape[0]//2)
-            M_crop2warp = None
+        M_crop2warp = None
 
-        scoring_box_global = coarse_box
-        _, bull_center, _ = detect_bullseye(scoring_img, center_hint=center_hint)
-        wedges_vis, wedges_clean, scores_order, masks_dict = draw_wedges_aligned(scoring_img, bull_center)
+    scoring_box_global = coarse_box
+    _, bull_center, _ = detect_bullseye(scoring_img, center_hint=center_hint)
+    wedges_vis, wedges_clean, scores_order, masks_dict = draw_wedges_aligned(scoring_img, bull_center)
 
-        radius = int(2 * min(
-            bull_center[0], bull_center[1],
-            scoring_img.shape[1]-bull_center[0],
-            scoring_img.shape[0]-bull_center[1]
-        ))
-        mask_red, mask_green = make_color_masks(wedges_clean)
+    radius = int(2 * min(
+        bull_center[0], bull_center[1],
+        scoring_img.shape[1]-bull_center[0],
+        scoring_img.shape[0]-bull_center[1]
+    ))
+    mask_red, mask_green = make_color_masks(wedges_clean)
 
-        # --- Compose transform: full image -> warped scoring space
-        if M_crop2warp is not None:
-            x, y, w, h = coarse_box
-            # shift crop back to global
-            M_offset = np.array([
-                [1, 0, -x],
-                [0, 1, -y],
-                [0, 0, 1]
-            ], dtype=np.float32)
-            M_full = M_crop2warp @ M_offset
-        else:
-            M_full = None
+    # --- Compose transform: full image -> warped scoring space
+    if M_crop2warp is not None:
+        x, y, w, h = coarse_box
+        # shift crop back to global
+        M_offset = np.array([
+            [1, 0, -x],
+            [0, 1, -y],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        M_full = M_crop2warp @ M_offset
+    else:
+        M_full = None
 
-        return (wedges_vis, scores_order, scoring_box_global, conf,
-                scoring_method, masks_dict, (bull_center, radius),
-                (mask_red, mask_green), scoring_img, M_full)
-    
-    finally:
-        # Clean up intermediate variables
-        gc.collect()
+    return (wedges_vis, scores_order, scoring_box_global, conf,
+            scoring_method, masks_dict, (bull_center, radius),
+            (mask_red, mask_green), scoring_img, M_full)
 
 # ===============================
 # --- FastAPI App
@@ -1694,25 +1653,8 @@ if __name__ == "__main__":
     print(f"🚀 Starting Bullseye API on port {port}")
     print(f"🌐 Host: 0.0.0.0")
     print(f"🔌 Port: {port}")
-    print(f"💾 Memory limit: 50% of available RAM (1GB)")
-    print(f"🔧 Threading: Single thread for stability")
-    print(f"⚡ Optimized for Render Cloud 2GB RAM")
-    
-    # Optimized uvicorn configuration for Render
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=port, 
-        log_level="warning",  # Reduced logging to save memory
-        access_log=False,  # Disable access logs to save memory
-        workers=1,  # Single worker for 2GB RAM
-        loop="asyncio",  # Use asyncio loop
-        http="httptools",  # Use httptools for better performance
-        limit_concurrency=10,  # Limit concurrent connections
-        limit_max_requests=1000,  # Restart worker after 1000 requests to prevent memory leaks
-        timeout_keep_alive=30,  # Keep-alive timeout
-        timeout_graceful_shutdown=30  # Graceful shutdown timeout
-    )
+    print(f"💾 Memory limit: 20% of available RAM")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", access_log=True)
 
 @app.get("/")
 def root():
@@ -2139,47 +2081,23 @@ def ping():
 @app.get("/healthz")
 def healthz():
     import psutil
-    import gc
-    
     memory_info = psutil.virtual_memory()
-    
+
     # Get TensorFlow memory info if available
     tf_memory = "N/A"
-    tf_memory_peak = "N/A"
     try:
         import tensorflow as tf
-        tf_mem_info = tf.config.experimental.get_memory_info('CPU:0')
-        tf_memory = f"{tf_mem_info['current'] / (1024**2):.1f} MB"
-        tf_memory_peak = f"{tf_mem_info['peak'] / (1024**2):.1f} MB"
+        tf_memory = f"{tf.config.experimental.get_memory_info('CPU:0')['current'] / (1024**2):.1f} MB"
     except:
         pass
 
-    # Calculate memory efficiency
-    memory_efficiency = (memory_info.available / memory_info.total) * 100
-    
-    # Check if memory usage is within safe limits
-    memory_warning = memory_efficiency < 20  # Warning if less than 20% available
-    
-    # Force garbage collection for health check
-    gc.collect()
-    
     return {
         "ok": True,
-        "status": "healthy" if not memory_warning else "warning",
         "memory_usage": {
             "total": f"{memory_info.total / (1024**3):.2f} GB",
             "available": f"{memory_info.available / (1024**3):.2f} GB",
-            "used": f"{(memory_info.total - memory_info.available) / (1024**3):.2f} GB",
             "percent": f"{memory_info.percent:.1f}%",
-            "efficiency": f"{memory_efficiency:.1f}%",
-            "tensorflow_memory": tf_memory,
-            "tensorflow_peak": tf_memory_peak
+            "tensorflow_memory": tf_memory
         },
-        "render_status": "Memory optimized for 2GB RAM (1 CPU, 2GB)",
-        "warnings": ["Low memory available"] if memory_warning else [],
-        "optimization": {
-            "memory_allocation": "50% of available RAM",
-            "threading": "Single thread for stability",
-            "garbage_collection": "Enhanced cleanup"
-        }
+        "render_status": "Memory optimized for 2GB RAM (1 CPU, 2GB)"
     }
