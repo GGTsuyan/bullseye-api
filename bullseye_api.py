@@ -246,8 +246,12 @@ def run_detector(image_bgr, debug=False):
                 tip_x, tip_y = tip_coords
                 raw_results.append((x1, y1, x2, y2, scores[i], tip_x, tip_y))
 
-        # --- Stability filter (temporarily disabled for debugging) ---
-        confirmed_darts = raw_results.copy()  # Use all detected darts immediately
+        # --- Deduplication ---
+        confirmed_darts = deduplicate_darts(raw_results)
+        
+        if debug and confirmed_darts:
+            for _, _, _, _, s, tx, ty in confirmed_darts:
+                print(f"🎯 Deduplicated dart: score={s:.2f}, tip=({tx}, {ty})")
         
         # Keep the old stability filter code commented for reference
         # confirmed_darts = []
