@@ -178,7 +178,7 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
 # ===============================
 # --- Dart Detector Wrapper
 # ===============================
-def deduplicate_darts(detections, min_distance=15):
+def deduplicate_darts(detections, min_distance=20):
     """
     Merge/remove detections that are too close together (likely duplicates).
     detections: list of tuples (x1, y1, x2, y2, score, tip_x, tip_y)
