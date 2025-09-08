@@ -1264,16 +1264,6 @@ async def live_dart_detect(file: UploadFile = File(...)):
     detections = run_detector(image, debug=True)  # Enable debug for more info
     print(f"🎯 TENSORFLOW CHECK: Found {len(detections) if detections else 0} darts in original frame")
     
-    # Apply distortion to any detected darts to prevent re-detection
-    if detections:
-        print("🎯 DISTORTION: Applying distortion to detected dart regions...")
-        for i, (x1, y1, x2, y2, conf, tip_x, tip_y) in enumerate(detections):
-            # Distort the dart region in the original image
-            image = distort_dart_region(image, x1, y1, x2, y2, distortion_type="blur")
-            # Add to distorted regions tracking
-            add_distorted_region(x1, y1, x2, y2)
-            print(f"🎯 DISTORTION: Distorted dart {i+1} region ({x1}, {y1}, {x2}, {y2})")
-    
     # Always generate original frame image with dart detection for Dart Analyzer
     original_frame_with_darts = image.copy()
     if detections:
@@ -1396,6 +1386,9 @@ async def live_dart_detect(file: UploadFile = File(...)):
     print(f"🎯 ACCURACY: Using transformed detections (already in processed dartboard coordinates)")
     print(f"🎯 ACCURACY: detections exists: {detections is not None}, length: {len(detections) if detections else 0}")
     
+    # Store original detections for distortion later
+    original_detections = detections.copy() if detections else []
+    
     for i, (x1, y1, x2, y2, conf, tip_x, tip_y) in enumerate(detections):
         # All detections are already in processed dartboard coordinates
         wx, wy = int(tip_x), int(tip_y)
@@ -1494,6 +1487,20 @@ async def live_dart_detect(file: UploadFile = File(...)):
             dart_history = dart_history[-50:]
             print(f"✅ New dart detected in scoring region: {dart_score} points at position ({wx}, {wy})")
             print(f"🎯 DART HISTORY: Added dart to history. Total darts in history: {len(dart_history)}")
+            
+            # Apply distortion to the confirmed dart region to prevent re-detection
+            # Find the corresponding original detection for this confirmed dart
+            for j, orig_detection in enumerate(original_detections):
+                orig_x1, orig_y1, orig_x2, orig_y2, orig_conf, orig_tip_x, orig_tip_y = orig_detection
+                # Match by index or by similar coordinates/confidence
+                if (j == len(confirmed_darts) - 1) or \
+                   (abs(orig_conf - conf) < 0.05):  # Very close confidence
+                    print(f"🎯 DISTORTION: Applying distortion to confirmed dart region ({orig_x1}, {orig_y1}, {orig_x2}, {orig_y2})")
+                    # Distort the dart region in the original image
+                    image = distort_dart_region(image, orig_x1, orig_y1, orig_x2, orig_y2, distortion_type="blur")
+                    # Add to distorted regions tracking
+                    add_distorted_region(orig_x1, orig_y1, orig_x2, orig_y2)
+                    break
         else:
             print(f"🎯 DART HISTORY: Dart not confirmed - not added to history")
     
