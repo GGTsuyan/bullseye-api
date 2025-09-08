@@ -2100,3 +2100,4 @@ def healthz():
             "tensorflow_memory": tf_memory
         },
         "render_status": "Memory optimized for 2GB RAM (1 CPU, 2GB)"
+    }
