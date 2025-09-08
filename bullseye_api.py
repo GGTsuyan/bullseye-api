@@ -46,7 +46,7 @@ try:
     if gpus:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, False)
-    
+
     # Set memory limits before loading
     try:
         cpu_devices = tf.config.list_physical_devices('CPU')
@@ -54,18 +54,18 @@ try:
             tf.config.experimental.set_memory_growth(cpu_devices[0], False)
     except:
         pass
-    
+
     # Load model with memory optimization
     model = tf.saved_model.load(MODEL_DIR)
     infer = model.signatures["serving_default"]
-    
+
     # Clear any unnecessary variables
     tf.keras.backend.clear_session()
-    
+
     # Force garbage collection
     import gc
     gc.collect()
-    
+
     print("✅ TensorFlow model loaded successfully from", MODEL_DIR)
     print("🔧 TensorFlow configured for CPU-only usage")
     print("💾 Memory optimization applied for Render deployment")
@@ -110,9 +110,6 @@ dart_candidates = []  # [(wx, wy, score, frame_count)]
 # Store dartboard scores for quick lookup
 last_dartboard_scores = {}  # {(wx, wy): score}
 
-# Store distorted dart regions to prevent re-detection
-distorted_regions = []  # [(x1, y1, x2, y2, timestamp)] - bounding boxes of distorted darts
-
 # ===============================
 # --- Game State Management
 # ===============================
@@ -125,127 +122,17 @@ def is_valid_board_location(wx, wy, bull_info, warp_size):
     """Check if coordinates are within valid dartboard area."""
     if not bull_info or not warp_size:
         return False
-    
+
     bull_center, radius = bull_info
     h, w = warp_size
-    
+
     # Check if within image bounds
     if wx < 0 or wx >= w or wy < 0 or wy >= h:
         return False
-    
+
     # Check if within dartboard radius (with some margin)
     distance_from_center = ((wx - bull_center[0]) ** 2 + (wy - bull_center[1]) ** 2) ** 0.5
     return distance_from_center <= radius * 1.1  # 10% margin
-
-def distort_dart_region(image, x1, y1, x2, y2, distortion_type="blur"):
-    """
-    Distort a dart region in the image to prevent re-detection.
-    
-    Args:
-        image: Input image (BGR format)
-        x1, y1, x2, y2: Bounding box coordinates
-        distortion_type: Type of distortion ("blur", "noise", "blackout", "pixelate")
-    
-    Returns:
-        Modified image with distorted dart region
-    """
-    if image is None or image.size == 0:
-        return image
-    
-    # Ensure coordinates are within image bounds
-    h, w = image.shape[:2]
-    x1 = max(0, min(x1, w-1))
-    y1 = max(0, min(y1, h-1))
-    x2 = max(x1+1, min(x2, w))
-    y2 = max(y1+1, min(y2, h))
-    
-    # Expand the region slightly to ensure complete coverage
-    padding = 15
-    x1 = max(0, x1 - padding)
-    y1 = max(0, y1 - padding)
-    x2 = min(w, x2 + padding)
-    y2 = min(h, y2 + padding)
-    
-    # Create a copy to avoid modifying the original
-    distorted_image = image.copy()
-    region = distorted_image[y1:y2, x1:x2]
-    
-    if region.size == 0:
-        return distorted_image
-    
-    if distortion_type == "blur":
-        # Apply heavy Gaussian blur
-        blurred_region = cv2.GaussianBlur(region, (25, 25), 0)
-        distorted_image[y1:y2, x1:x2] = blurred_region
-        
-    elif distortion_type == "noise":
-        # Add random noise
-        noise = np.random.randint(0, 256, region.shape, dtype=np.uint8)
-        noisy_region = cv2.addWeighted(region, 0.2, noise, 0.8, 0)
-        distorted_image[y1:y2, x1:x2] = noisy_region
-        
-    elif distortion_type == "blackout":
-        # Fill with black
-        distorted_image[y1:y2, x1:x2] = (0, 0, 0)
-        
-    elif distortion_type == "pixelate":
-        # Pixelate the region
-        small_region = cv2.resize(region, (6, 6), interpolation=cv2.INTER_NEAREST)
-        pixelated_region = cv2.resize(small_region, (x2-x1, y2-y1), interpolation=cv2.INTER_NEAREST)
-        distorted_image[y1:y2, x1:x2] = pixelated_region
-        
-    elif distortion_type == "inpaint":
-        # Use OpenCV's inpainting to fill the region
-        mask = np.ones((y2-y1, x2-x1), dtype=np.uint8) * 255
-        inpainted_region = cv2.inpaint(region, mask, 5, cv2.INPAINT_TELEA)
-        distorted_image[y1:y2, x1:x2] = inpainted_region
-    
-    return distorted_image
-
-def is_dart_in_distorted_region(x1, y1, x2, y2, distorted_regions, threshold=50):
-    """
-    Check if a dart detection overlaps with any previously distorted region.
-    
-    Args:
-        x1, y1, x2, y2: Current dart bounding box
-        distorted_regions: List of previously distorted regions
-        threshold: Minimum overlap area to consider as duplicate
-    
-    Returns:
-        True if dart overlaps with distorted region, False otherwise
-    """
-    for dist_x1, dist_y1, dist_x2, dist_y2, _ in distorted_regions:
-        # Calculate intersection area
-        intersection_x1 = max(x1, dist_x1)
-        intersection_y1 = max(y1, dist_y1)
-        intersection_x2 = min(x2, dist_x2)
-        intersection_y2 = min(y2, dist_y2)
-        
-        if intersection_x1 < intersection_x2 and intersection_y1 < intersection_y2:
-            intersection_area = (intersection_x2 - intersection_x1) * (intersection_y2 - intersection_y1)
-            current_area = (x2 - x1) * (y2 - y1)
-            
-            # If intersection is significant, consider it a duplicate
-            if intersection_area > threshold and intersection_area > current_area * 0.3:
-                return True
-    
-    return False
-
-def add_distorted_region(x1, y1, x2, y2):
-    """Add a new distorted region to the tracking list."""
-    import time
-    global distorted_regions
-    distorted_regions.append((x1, y1, x2, y2, time.time()))
-    
-    # Keep only recent distortions (last 30 seconds)
-    current_time = time.time()
-    distorted_regions = [(x1, y1, x2, y2, timestamp) for x1, y1, x2, y2, timestamp in distorted_regions 
-                        if current_time - timestamp < 30]
-
-def clear_distorted_regions():
-    """Clear all distorted regions (useful for new game/turn)."""
-    global distorted_regions
-    distorted_regions = []
 
 # ===============================
 # --- Dart Tip Finder
@@ -267,23 +154,23 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=20,
                             minLineLength=max(8, int(0.3 * max(roi.shape))),
                             maxLineGap=10)
-    
+
     tip_img_coord = None
     if lines is not None and len(lines) > 0:
         # Find the longest line (most likely to be the dart shaft)
         best_line = max(lines[:,0], key=lambda l: np.hypot(l[2]-l[0], l[3]-l[1]))
         x3, y3, x4, y4 = best_line
-        
+
         # Choose the tip end (usually the smaller x coordinate for horizontal darts)
         chosen = (x3, y3) if x3 < x4 else (x4, y4)
         tip_img_coord = (chosen[0] + x1, chosen[1] + y1)
-        
+
         if debug:
             print(f"✅ Dart tip detected: {tip_img_coord} from line {best_line}")
     else:
         if debug:
             print(f"⚠️ No lines detected in ROI for dart tip detection")
-    
+
     # 🚀 REMOVED FORCED FALLBACK: Only return detected tip or None
     # This prevents false positive dart tip detection and improves accuracy
     return tip_img_coord
@@ -291,37 +178,20 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
 # ===============================
 # --- Dart Detector Wrapper
 # ===============================
-def deduplicate_darts(detections, min_distance=15):
+def deduplicate_darts(detections, min_distance=10):
     """
     Merge/remove detections that are too close together (likely duplicates).
     detections: list of tuples (x1, y1, x2, y2, score, tip_x, tip_y)
     min_distance: minimum pixel distance between unique dart tips
     """
-    if not detections:
-        return []
-    
-    # Sort by confidence score (highest first)
-    sorted_detections = sorted(detections, key=lambda x: x[4], reverse=True)
-    
     filtered = []
-    for d in sorted_detections:
+    for d in detections:
         _, _, _, _, _, tx, ty = d
-        is_duplicate = False
-        
-        for fd in filtered:
-            fd_tx, fd_ty = fd[5], fd[6]
-            distance = ((tx - fd_tx) ** 2 + (ty - fd_ty) ** 2) ** 0.5
-            
-            if distance < min_distance:
-                print(f"🔍 DEDUPLICATION: Skipping duplicate dart at distance {distance:.1f}px")
-                is_duplicate = True
-                break
-        
-        if not is_duplicate:
+        if not any(
+            ((tx - fd[5]) ** 2 + (ty - fd[6]) ** 2) ** 0.5 < min_distance
+            for fd in filtered
+        ):
             filtered.append(d)
-            print(f"🔍 DEDUPLICATION: Keeping dart at ({tx}, {ty})")
-    
-    print(f"🔍 DEDUPLICATION: {len(detections)} -> {len(filtered)} darts")
     return filtered
 
 
@@ -371,23 +241,20 @@ def run_detector(image_bgr, debug=False):
             x1, y1 = int(xmin * w_orig), int(ymin * h_orig)
             x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
 
-            # Check if this dart is in a previously distorted region
-            if is_dart_in_distorted_region(x1, y1, x2, y2, distorted_regions):
-                print(f"🔍 DISTORTION FILTER: Skipping detection {i} - overlaps with distorted region ({x1}, {y1}, {x2}, {y2})")
-                continue
-
             tip_coords = find_dart_tip(x1, y1, x2, y2, image_bgr, debug)
             if tip_coords is not None:
                 tip_x, tip_y = tip_coords
                 raw_results.append((x1, y1, x2, y2, scores[i], tip_x, tip_y))
 
+        # --- Stability filter (temporarily disabled for debugging) ---
+        confirmed_darts = raw_results.copy()  # Use all detected darts immediately
         # --- Deduplication ---
         confirmed_darts = deduplicate_darts(raw_results)
         
         if debug and confirmed_darts:
             for _, _, _, _, s, tx, ty in confirmed_darts:
                 print(f"🎯 Deduplicated dart: score={s:.2f}, tip=({tx}, {ty})")
-        
+
         # Keep the old stability filter code commented for reference
         # confirmed_darts = []
         # new_pending = []
@@ -560,7 +427,7 @@ def detect_dartboard_tf(image, width=640, height=640):
     except Exception as e:
         print("TF Detection error:", e)
         raise RuntimeError(f"Dartboard detection failed: {e}")
-    
+
 
 # -------------------------------
 # HSV Fallback (coarse crop)
@@ -914,7 +781,7 @@ async def startup_event():
 
 @app.post("/init-board")
 async def init_board(file: UploadFile = File(...)):
-    
+
     contents = await file.read()
     npimg = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
@@ -1046,11 +913,11 @@ async def detect_dart(file: UploadFile = File(...)):
         dart_history.append(dart_entry)
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
-        
+
         # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic
         if current_game is not None:
             final_score = dart_score  # This is the final score (e.g., 60 for triple 20)
-            
+
             # Extract base score and multiplier from final score
             if final_score == 50:  # Bullseye
                 base_score = 50
@@ -1067,7 +934,7 @@ async def detect_dart(file: UploadFile = File(...)):
             else:  # Single
                 base_score = final_score
                 multiplier = 1
-            
+
             # Add dart to game state
             result = current_game.add_dart(base_score, multiplier)
             print(f"🎯 Dart added to game: {base_score} x{multiplier} = {final_score} points, result: {result}")
@@ -1106,17 +973,17 @@ async def detect_dart(file: UploadFile = File(...)):
 async def detect_dart_debug(file: UploadFile = File(...)):
     """Debug endpoint for dart detection with detailed logging."""
     global last_transform, last_warp_size, last_scoring_map
-    
+
     if last_transform is None:
         return JSONResponse({"error": "Board not initialized"}, status_code=400)
-    
+
     contents = await file.read()
     npimg = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-    
+
     # Run detector with debug enabled
     detections = run_detector(image, debug=True)
-    
+
     if not detections:
         return {
             "status": "no_darts",
@@ -1124,7 +991,7 @@ async def detect_dart_debug(file: UploadFile = File(...)):
             "darts": [],
             "debug_info": "No valid dart tips found"
         }
-    
+
     # Process detections with debug info
     debug_darts = []
     for (x1, y1, x2, y2, conf, tip_x, tip_y) in detections:
@@ -1134,7 +1001,7 @@ async def detect_dart_debug(file: UploadFile = File(...)):
             "tip": [int(tip_x), int(tip_y)],
             "debug_note": "Valid tip detected"
         })
-    
+
     return {
         "status": "success",
         "darts": debug_darts,
@@ -1145,27 +1012,22 @@ async def detect_dart_debug(file: UploadFile = File(...)):
 
 @app.post("/reset-turn")
 async def reset_turn():
-    global turn_darts, current_game, distorted_regions
+    global turn_darts, current_game
     turn_darts = []
-    
-    # Clear distorted regions when resetting turn
-    clear_distorted_regions()
-    print("🔄 Turn reset - cleared distorted regions")
-    
+
     if current_game is not None:
         # Reset turn in game state
         current_game.end_turn(force=True)
         print("🔄 Turn reset in game state")
-    
+
     # Get current game state if available
     game_state = None
     if current_game is not None:
         game_state = current_game.get_state()
-    
+
     return {
         "status": "turn reset",
-        "game_state": game_state,
-        "distorted_regions_cleared": True
+        "game_state": game_state
     }
 
 @app.get("/debug-visual")
@@ -1230,11 +1092,11 @@ async def debug_visual():
 async def start_live_tracking():
     """Start live tracking mode for automatic dart detection."""
     global dart_history, turn_darts
-    
+
     # Reset tracking state
     dart_history = []
     turn_darts = []
-    
+
     return {
         "status": "success",
         "message": "Live tracking started successfully",
@@ -1265,22 +1127,22 @@ async def live_dart_detect(file: UploadFile = File(...)):
     global dart_history, turn_darts, current_game, last_transform, last_warp_size, last_scoring_map
     global last_warped_img, last_masks_dict, last_bull_info, last_masks_rg, last_dartboard_scores
     global last_warped_dart_img
-    
+
     if last_transform is None:
         return JSONResponse({"error": "Board not initialized"}, status_code=400)
-    
+
     contents = await file.read()
     npimg = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-    
+
     # Step 1: Continuous frame monitoring - check if there's a new dart in the dartboard using TensorFlow
     print("🎯 TENSORFLOW CHECK: Detecting darts in original frame...")
     print(f"🎯 TENSORFLOW CHECK: Image shape: {image.shape}, dtype: {image.dtype}")
     print(f"🎯 TENSORFLOW CHECK: Image min/max values: {np.min(image)}/{np.max(image)}")
-    
+
     detections = run_detector(image, debug=True)  # Enable debug for more info
     print(f"🎯 TENSORFLOW CHECK: Found {len(detections) if detections else 0} darts in original frame")
-    
+
     # Always generate original frame image with dart detection for Dart Analyzer
     original_frame_with_darts = image.copy()
     if detections:
@@ -1293,10 +1155,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
             cv2.putText(original_frame_with_darts, f"{conf:.2f}", (x1, y1 - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             print(f"🎯 DART ANALYZER: Drew dart {i+1} on original frame: ({x1}, {y1}) to ({x2}, {y2}) with confidence {conf:.2f}")
-    
-    # Store the original image for distortion (before any modifications)
-    original_image_for_distortion = image.copy()
-    
+
     if not detections:
         print("🎯 No dart detected in original frame - take another frame")
         response_data = {
@@ -1308,34 +1167,34 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "turn_darts": len(turn_darts),
             "game_update": current_game.get_state() if current_game else None
         }
-        
+
         # Add original frame image (with or without darts)
         _, buf = cv2.imencode(".png", original_frame_with_darts)
         original_frame_b64 = base64.b64encode(buf).decode("utf-8")
         response_data["original_frame_image"] = original_frame_b64
         print(f"🎯 DART ANALYZER: Added original frame image (size: {len(original_frame_b64)} chars)")
-        
+
         # Add clean dartboard image even when no darts detected
         if last_warped_img is not None:
             _, buf = cv2.imencode(".png", last_warped_img)
             clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
             response_data["dartboard_visualization"] = clean_dartboard_b64
             print(f"🎯 DART ANALYZER: Added clean dartboard image (size: {len(clean_dartboard_b64)} chars)")
-        
+
         return response_data
-    
+
     # Step 2: Dart detected in original frame - process it to get warped dartboard with dart
     print("🎯 Dart detected in original frame! Processing frame with dart...")
-    
+
     # Process the original frame (with dart) to get the warped dartboard
     if last_transform is not None and last_warp_size is not None:
         # Warp the original frame (with dart) to get the processed dartboard
         warped_frame = cv2.warpPerspective(image, last_transform, last_warp_size)
         print(f"🎯 Processed original frame with dart - warped size: {warped_frame.shape}")
-        
+
         # Update the global warped dart image for visualization
         last_warped_dart_img = warped_frame.copy()
-        
+
         # Use the warped frame as the scoring region
         warped_scoring_region = warped_frame
     else:
@@ -1349,26 +1208,26 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "turn_darts": len(turn_darts),
             "game_update": current_game.get_state() if current_game else None
         }
-    
+
     # Step 3: Detect dart directly in the processed frame (with dart visible)
     print("🎯 Detecting dart directly in processed frame (with dart visible)...")
     print(f"🎯 Processed frame size: {warped_scoring_region.shape}")
-    
+
     # Detect dart directly in the processed frame using TensorFlow
     print(f"🎯 PROCESSED FRAME DEBUG: Image shape: {warped_scoring_region.shape}")
     print(f"🎯 PROCESSED FRAME DEBUG: Image dtype: {warped_scoring_region.dtype}")
     print(f"🎯 PROCESSED FRAME DEBUG: Image min/max: {np.min(warped_scoring_region)}/{np.max(warped_scoring_region)}")
-    
+
     detections_processed = run_detector(warped_scoring_region, debug=True)
     print(f"🎯 Processed frame detections: {len(detections_processed) if detections_processed else 0} darts found")
-    
+
     if not detections_processed:
         print("🎯 PROCESSED FRAME DEBUG: No dart detected in processed frame - possible reasons:")
         print("🎯 PROCESSED FRAME DEBUG: 1. Dart too small in processed frame")
         print("🎯 PROCESSED FRAME DEBUG: 2. Confidence threshold too high")
         print("🎯 PROCESSED FRAME DEBUG: 3. Model trained on original frames, not processed")
         print("🎯 PROCESSED FRAME DEBUG: 4. Image quality issues in processed frame")
-    
+
     if not detections_processed:
         print("🎯 No dart detected in processed frame")
         response_data = {
@@ -1380,45 +1239,42 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "turn_darts": len(turn_darts),
             "game_update": current_game.get_state() if current_game else None
         }
-        
+
         # Add processed frame image even when no darts detected
         if warped_scoring_region is not None:
             _, buf = cv2.imencode(".png", warped_scoring_region)
             processed_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
             response_data["dartboard_visualization"] = processed_dartboard_b64
             print(f"🎯 Added processed frame to no-darts response (size: {len(processed_dartboard_b64)} chars)")
-        
+
         return response_data
-    
+
     # Use the processed frame detections for scoring
     detections = detections_processed
     print("🎯 ACCURACY: Using processed frame detections for precise scoring")
-    
+
     # Step 4: Process detections and score dart in warped image
     new_darts = []
     h, w = last_warp_size
-    
+
     # Build detection list - handle both processed and original detections
     detections_warped = []
     print(f"🎯 ACCURACY: Processing {len(detections)} darts")
-    
+
     # All detections are now in processed dartboard coordinates
     print(f"🎯 ACCURACY: Using transformed detections (already in processed dartboard coordinates)")
     print(f"🎯 ACCURACY: detections exists: {detections is not None}, length: {len(detections) if detections else 0}")
-    
-    # Store original detections for distortion later
-    original_detections = detections.copy() if detections else []
-    
+
     for i, (x1, y1, x2, y2, conf, tip_x, tip_y) in enumerate(detections):
         # All detections are already in processed dartboard coordinates
         wx, wy = int(tip_x), int(tip_y)
         print(f"🎯 ACCURACY: Dart {i+1} - Processed coordinates: tip=({wx}, {wy}), bbox=({x1}, {y1}, {x2}, {y2}), conf={conf:.2f}")
-        
+
         # Ensure coordinates are within bounds
         wx = max(0, min(wx, w - 1))
         wy = max(0, min(wy, h - 1))
         print(f"🎯 ACCURACY: Dart {i+1} - Final coordinates: tip=({wx}, {wy})")
-        
+
         # Step 5: Score dart in warped image using proper classification
         if last_bull_info and last_masks_dict and last_masks_rg:
             bull_center, radius = last_bull_info
@@ -1430,13 +1286,13 @@ async def live_dart_detect(file: UploadFile = File(...)):
         else:
             # Fallback to simple scoring map
             dart_score = int(last_scoring_map[wy, wx])
-        
+
         # Store in dartboard scores for quick lookup
         last_dartboard_scores[(wx, wy)] = dart_score
-        
+
         detections_warped.append((dart_score, conf, wx, wy))
         print(f"🎯 Dart scored in warped image: tip=({wx}, {wy}), score={dart_score}, conf={conf:.2f}")
-    
+
     # ---------------------------------------
     # Deduplicate & confirm new darts
     # ---------------------------------------
@@ -1507,30 +1363,16 @@ async def live_dart_detect(file: UploadFile = File(...)):
             dart_history = dart_history[-50:]
             print(f"✅ New dart detected in scoring region: {dart_score} points at position ({wx}, {wy})")
             print(f"🎯 DART HISTORY: Added dart to history. Total darts in history: {len(dart_history)}")
-            
-            # Apply distortion to the confirmed dart region to prevent re-detection
-            # Find the corresponding original detection for this confirmed dart
-            for j, orig_detection in enumerate(original_detections):
-                orig_x1, orig_y1, orig_x2, orig_y2, orig_conf, orig_tip_x, orig_tip_y = orig_detection
-                # Match by index or by similar coordinates/confidence
-                if (j == len(confirmed_darts) - 1) or \
-                   (abs(orig_conf - conf) < 0.05):  # Very close confidence
-                    print(f"🎯 DISTORTION: Applying distortion to confirmed dart region ({orig_x1}, {orig_y1}, {orig_x2}, {orig_y2})")
-                    # Distort the dart region in the original image
-                    original_image_for_distortion = distort_dart_region(original_image_for_distortion, orig_x1, orig_y1, orig_x2, orig_y2, distortion_type="blur")
-                    # Add to distorted regions tracking
-                    add_distorted_region(orig_x1, orig_y1, orig_x2, orig_y2)
-                    break
         else:
             print(f"🎯 DART HISTORY: Dart not confirmed - not added to history")
-    
+
     # Always return dartboard visualization, even if no new darts
     print("🎯 Processing response - new darts: {}, total darts: {}".format(len(confirmed_darts), len(dart_history)))
-    
+
     # Work on a copy of the processed frame (with dart) for visualization
     vis_img = warped_scoring_region.copy() if warped_scoring_region is not None else None
     print(f"🎯 VISUALIZATION: Using processed frame with dart for visualization: {vis_img is not None}")
-    
+
     # Draw ALL darts from dart history on the visualization (not just new ones)
     if vis_img is not None:
         if dart_history:
@@ -1549,14 +1391,14 @@ async def live_dart_detect(file: UploadFile = File(...)):
                     )
         else:
             print(f"🎯 No darts in history, showing clean board")
-    
+
     # Process confirmed darts
     for dart_info in confirmed_darts:
         # Check if we already have too many darts in this turn (max 3)
         if len(turn_darts) >= 3:
             print(f"⚠️ Turn already has 3 darts, skipping new detection")
             continue
-        
+
         dart_entry = {
             "bbox": [0, 0, 0, 0],  # Not available in new format
             "confidence": dart_info["conf"],
@@ -1566,10 +1408,10 @@ async def live_dart_detect(file: UploadFile = File(...)):
             "y": dart_info["y"],
             "score": dart_info["score"]
         }
-        
+
         turn_darts.append(dart_entry)
         new_darts.append(dart_entry)
-        
+
         # --- Draw visualization on warped board ---
         if vis_img is not None:
             wx, wy = dart_info["x"], dart_info["y"]
@@ -1581,11 +1423,11 @@ async def live_dart_detect(file: UploadFile = File(...)):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                 (0, 255, 0), 2
             )
-        
+
         # 🎯 INTEGRATE WITH GAMESTATE: Add dart to game logic immediately
         if current_game is not None:
             final_score = dart_info["score"]  # This is the final score (e.g., 60 for triple 20)
-            
+
             # Extract base score and multiplier from final score
             if final_score == 50:  # Bullseye
                 base_score = 50
@@ -1602,15 +1444,15 @@ async def live_dart_detect(file: UploadFile = File(...)):
             else:  # Single
                 base_score = final_score
                 multiplier = 1
-            
+
             # Add dart to game state immediately
             status = current_game.add_dart(base_score, multiplier)
             print(f"🎯 Live dart added to game: {base_score} x{multiplier} = {final_score} points, status: {status}")
-    
+
     # Update the global warped dart image for visualization
     if vis_img is not None:
         last_warped_dart_img = vis_img.copy()
-    
+
     # Draw bounding boxes around detected darts in the processed dartboard image
     dartboard_with_boxes = vis_img.copy() if vis_img is not None else None
     print(f"🎯 DART ANALYZER: vis_img available: {vis_img is not None}, dartboard_with_boxes available: {dartboard_with_boxes is not None}")
@@ -1623,18 +1465,18 @@ async def live_dart_detect(file: UploadFile = File(...)):
             print(f"🎯 DART ANALYZER: No detections to draw bounding boxes for")
     else:
         print(f"🎯 DART ANALYZER: No dartboard image available for bounding boxes")
-    
+
     if dartboard_with_boxes is not None and detections:
         for i, detection in enumerate(detections):
             x1, y1, x2, y2, conf, tip_x, tip_y = detection
-            
+
             # All detections are already in processed dartboard coordinates
             min_x = max(0, min(int(x1), w-1))
             min_y = max(0, min(int(y1), h-1))
             max_x = max(0, min(int(x2), w-1))
             max_y = max(0, min(int(y2), h-1))
             print(f"🎯 DART ANALYZER: Dart {i+1} - Processed bbox: ({min_x}, {min_y}) to ({max_x}, {max_y})")
-            
+
             # Draw bounding box on processed dartboard
             cv2.rectangle(dartboard_with_boxes, (min_x, min_y), (max_x, max_y), (0, 255, 0), 3)
             # Draw confidence score
@@ -1643,7 +1485,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
             print(f"🎯 DART ANALYZER: Drew bounding box {i+1} on processed dartboard: ({min_x}, {min_y}) to ({max_x}, {max_y}) with confidence {conf:.2f}")
         else:
             print(f"🎯 DART ANALYZER: No darts detected - dartboard_with_boxes will show clean dartboard")
-    
+
     # Encode processed dartboard image with dart bounding boxes to base64
     processed_dartboard_b64 = None
     if dartboard_with_boxes is not None:
@@ -1655,17 +1497,17 @@ async def live_dart_detect(file: UploadFile = File(...)):
         _, buf = cv2.imencode(".png", vis_img)
         processed_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
         print(f"🎯 DART ANALYZER: Generated clean dartboard (no darts detected), size: {len(processed_dartboard_b64)} chars")
-    
+
     # Also encode processed dartboard visualization for reference (always show board)
     dartboard_b64 = None
     if vis_img is not None:
         _, buf = cv2.imencode(".png", vis_img)
         dartboard_b64 = base64.b64encode(buf).decode("utf-8")
         print(f"🎯 Generated dartboard visualization with {len(dart_history)} darts, size: {len(dartboard_b64)} chars")
-    
+
     # Return response with dart data and images
     game_update = current_game.get_state() if current_game else None
-    
+
     response_data = {
         "status": "success" if confirmed_darts else "no_darts",
         "darts": confirmed_darts,  # Only new darts
@@ -1675,20 +1517,13 @@ async def live_dart_detect(file: UploadFile = File(...)):
         "turn_darts": len(turn_darts),
         "game_update": game_update
     }
-    
+
     # Add original frame image with dart detection for Dart Analyzer
     _, buf = cv2.imencode(".png", original_frame_with_darts)
     original_frame_b64 = base64.b64encode(buf).decode("utf-8")
     response_data["original_frame_image"] = original_frame_b64
     print(f"🎯 DART ANALYZER: Added original frame image with dart detection (size: {len(original_frame_b64)} chars)")
-    
-    # Add distorted image to show the effect of distortion
-    if len(confirmed_darts) > 0:
-        _, buf_distorted = cv2.imencode(".png", original_image_for_distortion)
-        distorted_frame_b64 = base64.b64encode(buf_distorted).decode("utf-8")
-        response_data["distorted_frame_image"] = distorted_frame_b64
-        print(f"🎯 DISTORTION: Added distorted frame image (size: {len(distorted_frame_b64)} chars)")
-    
+
     # Add processed dartboard with dart bounding boxes for Dart Analyzer
     if processed_dartboard_b64 is not None:
         response_data["dartboard_visualization"] = processed_dartboard_b64
@@ -1704,9 +1539,9 @@ async def live_dart_detect(file: UploadFile = File(...)):
             clean_dartboard_b64 = base64.b64encode(buf).decode("utf-8")
             response_data["dartboard_visualization"] = clean_dartboard_b64
             print(f"🎯 DART ANALYZER: Generated fallback clean dartboard (size: {len(clean_dartboard_b64)} chars)")
-    
+
     # Both images are now available for Dart Analyzer comparison
-    
+
     return response_data
 
 class GameStartRequest(BaseModel):
@@ -1735,41 +1570,39 @@ async def process_dart(dart: DartRequest):
 @app.post("/start-game")
 async def start_game(request: GameStartRequest):
     """Start a new game with specified mode and players."""
-    global dart_history, turn_darts, current_game, distorted_regions
-    
+    global dart_history, turn_darts, current_game
+
     # Create new game instance with real GameState
     current_game = GameState(
         mode=request.mode,
         players=request.players,
         double_out=True
     )
-    
+
     # Reset game state
     dart_history = []
     turn_darts = []
-    clear_distorted_regions()  # Clear all distorted regions for new game
-    
+
     return {
         "status": "success",
         "message": "Game started successfully",
-        "game_state": current_game.get_state(),
-        "distorted_regions_cleared": True
+        "game_state": current_game.get_state()
     }
 
 @app.post("/end-turn")
 async def end_turn():
     """End the current turn and calculate final scores."""
     global turn_darts, current_game
-    
+
     if current_game is None:
         return JSONResponse({"error": "No game in progress"}, status_code=400)
-    
+
     # End turn using real GameState
     current_game.end_turn()
-    
+
     # Get updated game state
     game_state = current_game.get_state()
-    
+
     return {
         "status": "success",
         "message": "Turn ended successfully",
@@ -1781,13 +1614,13 @@ async def end_turn():
 async def get_game_state():
     """Get current game state."""
     global current_game
-    
+
     if current_game is None:
         return JSONResponse({"error": "No game in progress"}, status_code=400)
-    
+
     # Get real game state from GameState instance
     game_state = current_game.get_state()
-    
+
     return {
         "status": "success",
         "game_state": game_state
@@ -1797,13 +1630,13 @@ async def get_game_state():
 async def get_current_score():
     """Get current player's remaining score."""
     global current_game
-    
+
     if current_game is None:
         return JSONResponse({"error": "No game in progress"}, status_code=400)
-    
+
     current_player = current_game.players[current_game.current_player]
     remaining_score = current_game.scores[current_player]
-    
+
     return {
         "status": "success",
         "current_player": current_player,
@@ -1847,10 +1680,7 @@ def root():
             "/current-score (GET)",
             "/board-overlay (GET)",
             "/board-overlay-visual (GET)",
-            "/debug-board (GET)",
-            "/clear-distorted-regions (POST)",  # 🆕 Clear distorted regions
-            "/distorted-regions-status (GET)",  # 🆕 Get distortion status
-            "/distort-dart-region (POST)"  # 🆕 Manual dart distortion
+            "/debug-board (GET)"
         ]
     }
 
@@ -1878,23 +1708,23 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
         contents = await file.read()
         npimg = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-        
+
         if image is None:
             return JSONResponse({"error": "Invalid image"}, status_code=400)
-        
+
         # Step 1: Detect dartboard using detect_dartboard_tf
         print("🎯 Detecting dartboard using TensorFlow...")
         coarse_crop, coarse_box, conf = detect_dartboard_tf(image)
-        
+
         if coarse_crop is None:
             return JSONResponse({"error": "Dartboard not detected"}, status_code=404)
-        
+
         print(f"✅ Dartboard detected with confidence: {conf}")
-        
+
         # Step 2: Create green and red mask detection
         print("🎨 Creating green and red masks...")
         hsv = cv2.cvtColor(coarse_crop, cv2.COLOR_BGR2HSV)
-        
+
         # Red mask (two ranges for red color)
         lower_red1, upper_red1 = np.array([0, 80, 80]), np.array([10, 255, 255])
         lower_red2, upper_red2 = np.array([160, 80, 80]), np.array([179, 255, 255])
@@ -1902,45 +1732,45 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
             cv2.inRange(hsv, lower_red1, upper_red1),
             cv2.inRange(hsv, lower_red2, upper_red2)
         )
-        
+
         # Green mask
         lower_green, upper_green = np.array([35, 50, 50]), np.array([90, 255, 255])
         mask_green = cv2.inRange(hsv, lower_green, upper_green)
-        
+
         # Combine red and green masks
         ring_mask = cv2.bitwise_or(mask_red, mask_green)
-        
+
         # Clean up the mask
         kernel = np.ones((5, 5), np.uint8)
         ring_mask = cv2.morphologyEx(ring_mask, cv2.MORPH_CLOSE, kernel)
         ring_mask = cv2.morphologyEx(ring_mask, cv2.MORPH_OPEN, kernel)
-        
+
         # Step 2.5: Check camera stability by analyzing mask quality
         print("📱 Checking camera stability...")
-        
+
         # Calculate mask statistics for stability assessment
         red_pixels = cv2.countNonZero(mask_red)
         green_pixels = cv2.countNonZero(mask_green)
         total_pixels = mask_red.shape[0] * mask_red.shape[1]
-        
+
         # Calculate mask coverage percentages
         red_coverage = red_pixels / total_pixels
         green_coverage = green_pixels / total_pixels
         combined_coverage = (red_pixels + green_pixels) / total_pixels
-        
+
         print(f"📊 Mask coverage - Red: {red_coverage:.3f}, Green: {green_coverage:.3f}, Combined: {combined_coverage:.3f}")
-        
+
         # Check if masks are well-defined (stable camera)
         min_red_coverage = 0.01    # At least 1% red pixels
         min_green_coverage = 0.01  # At least 1% green pixels
         min_combined_coverage = 0.02  # At least 2% combined pixels
-        
+
         camera_stable = (
             red_coverage >= min_red_coverage and 
             green_coverage >= min_green_coverage and 
             combined_coverage >= min_combined_coverage
         )
-        
+
         if not camera_stable:
             print("❌ Camera not stable - masks too weak")
             return JSONResponse({
@@ -1956,38 +1786,38 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
                     }
                 }
             }, status_code=400)
-        
+
         print("✅ Camera is stable - masks are well-defined")
-        
+
         # Step 3: Find contours and fit ellipse
         print("🔍 Finding contours and fitting ellipse...")
         contours, _ = cv2.findContours(ring_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         if not contours:
             return JSONResponse({"error": "No contours found in mask"}, status_code=404)
-        
+
         # Find the largest contour
         largest_contour = max(contours, key=cv2.contourArea)
-        
+
         if len(largest_contour) < 5:
             return JSONResponse({"error": "Contour too small for ellipse fitting"}, status_code=404)
-        
+
         # Additional stability check: contour quality and blur detection
         contour_area = cv2.contourArea(largest_contour)
         contour_perimeter = cv2.arcLength(largest_contour, True)
-        
+
         # Calculate contour circularity (should be close to 1 for a good circle)
         if contour_perimeter > 0:
             circularity = 4 * np.pi * contour_area / (contour_perimeter * contour_perimeter)
         else:
             circularity = 0
-        
+
         print(f"📐 Contour analysis - Area: {contour_area:.0f}, Perimeter: {contour_perimeter:.0f}, Circularity: {circularity:.3f}")
-        
+
         # Check if contour is well-formed (stable camera)
         min_circularity = 0.3  # Minimum circularity for stable detection
         min_contour_area = 1000  # Minimum contour area
-        
+
         if circularity < min_circularity or contour_area < min_contour_area:
             print("❌ Contour quality too poor - camera may be moving or blurry")
             return JSONResponse({
@@ -2001,23 +1831,23 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
                     }
                 }
             }, status_code=400)
-        
+
         print("✅ Contour quality is good - camera is stable")
-        
+
         # Additional stability check: image sharpness (blur detection)
         print("🔍 Checking image sharpness...")
-        
+
         # Convert to grayscale for blur detection
         gray_crop = cv2.cvtColor(coarse_crop, cv2.COLOR_BGR2GRAY)
-        
+
         # Calculate Laplacian variance (higher = sharper image)
         laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
-        
+
         print(f"📸 Image sharpness (Laplacian variance): {laplacian_var:.2f}")
-        
+
         # Check if image is sharp enough (not blurry)
         min_sharpness = 50.0  # Minimum Laplacian variance for sharp image
-        
+
         if laplacian_var < min_sharpness:
             print("❌ Image too blurry - camera may be moving")
             return JSONResponse({
@@ -2027,28 +1857,28 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
                     "min_required": min_sharpness
                 }
             }, status_code=400)
-        
+
         print("✅ Image is sharp - camera is stable")
-        
+
         # Step 4: Create scoring zone boundary overlay (like the green outline in screenshot)
         print("🎨 Creating scoring zone boundary overlay...")
-        
+
         # Create a copy of the original image for visualization
         vis_image = image.copy()
-        
+
         # Draw the detected dartboard bounding box
         if coarse_box is not None:
             x1, y1, x2, y2 = coarse_box
             cv2.rectangle(vis_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        
+
         # Create the scoring zone overlay using draw_wedges_aligned approach
         # First, we need to detect the bullseye center
         bull_center, radius = detect_bullseye(coarse_crop)
-        
+
         # Define the standard dartboard scoring order
         scores_order = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17,
                        3, 19, 7, 16, 8, 11, 14, 9, 12, 5]
-        
+
         if bull_center is not None:
             # Convert bull_center to original image coordinates
             if coarse_box is not None:
@@ -2064,26 +1894,26 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
             else:
                 bull_center_orig = bull_center
                 radius_orig = radius
-            
+
             # Create the scoring zone boundary overlay
             # This will create the yellow outline that follows the actual scoring zones
-            
+
             # Method 1: Use the actual contour from the mask (most accurate)
             # Find the outer boundary of the scoring zones
             outer_contour = largest_contour
-            
+
             # Draw the yellow outline following the actual scoring zone boundary
             cv2.drawContours(vis_image, [outer_contour], -1, (0, 255, 255), 3)
-            
+
             # Method 2: Create a more refined boundary using the wedge masks
             # This creates a smoother outline that follows the scoring zones exactly
             h, w = coarse_crop.shape[:2]
             ang_step = 2 * np.pi / 20  # 20 wedges
-            
+
             # Find the top wedge boundary for alignment
             # This ensures the overlay is properly oriented
             top_angle = -np.pi/2  # Start from top (20 wedge)
-            
+
             # Create the scoring zone boundary points
             boundary_points = []
             for i in range(20):
@@ -2093,21 +1923,21 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
                 x = int(bull_center_orig[0] + radius_actual * np.cos(angle))
                 y = int(bull_center_orig[1] + radius_actual * np.sin(angle))
                 boundary_points.append([x, y])
-            
+
             # Draw the yellow boundary line connecting all points
             if len(boundary_points) > 2:
                 boundary_points = np.array(boundary_points, dtype=np.int32)
                 cv2.polylines(vis_image, [boundary_points], True, (0, 255, 255), 3)
-            
+
             # Add the bullseye center indicator
             cv2.circle(vis_image, bull_center_orig, 5, (0, 255, 255), -1)
-            
+
             # Add scoring zone labels (optional - for debugging)
             for i, score in enumerate(scores_order):
                 angle = top_angle + i * ang_step
                 x = int(bull_center_orig[0] + (radius_orig * 0.7) * np.cos(angle))
                 y = int(bull_center_orig[1] + (radius_orig * 0.7) * np.sin(angle))
-                
+
                 # Ensure text is within image bounds
                 if 0 <= x < vis_image.shape[1] and 0 <= y < vis_image.shape[0]:
                     cv2.putText(
@@ -2119,14 +1949,14 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
             print("⚠️ Bullseye detection failed, using fallback ellipse method")
             ellipse = cv2.fitEllipse(largest_contour)
             (center_x, center_y), (major_axis, minor_axis), angle = ellipse
-            
+
             # Draw the yellow ellipse
             cv2.ellipse(vis_image, ellipse, (0, 255, 255), 3)
-            
+
             # Update variables for response
             bull_center_orig = (int(center_x), int(center_y))
             radius_orig = int((major_axis + minor_axis) / 2)
-        
+
         # Add text labels
         cv2.putText(vis_image, f"Confidence: {conf:.2f}", (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -2134,11 +1964,11 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.putText(vis_image, f"Radius: {radius_orig}", (10, 90), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
+
         # Convert to base64 for Flutter
         _, buffer = cv2.imencode('.png', vis_image)
         overlay_b64 = base64.b64encode(buffer).decode('utf-8')
-        
+
         return {
             "status": "success",
             "message": "Scoring zone boundary overlay created successfully",
@@ -2160,7 +1990,7 @@ async def create_yellow_circle_overlay(file: UploadFile = File(...)):
                 }
             }
         }
-        
+
     except Exception as e:
         print(f"❌ Error creating scoring zone boundary overlay: {e}")
         return JSONResponse({"error": f"Failed to create overlay: {str(e)}"}, status_code=500)
@@ -2170,11 +2000,11 @@ def get_board_overlay():
     """Get board overlay information for Flutter app visualization."""
     if last_transform is None or last_scoring_map is None:
         return JSONResponse({"error": "Board not initialized"}, status_code=400)
-    
+
     # Return board boundaries and scoring zones for overlay
     h, w = last_warp_size
     bull_center, radius = last_bull_info
-    
+
     return {
         "status": "success",
         "overlay": {
@@ -2193,43 +2023,43 @@ def get_board_overlay():
 def get_board_overlay_visual():
     """Get the actual visual overlay image that the API generates."""
     global last_warped_img, last_masks_dict, last_bull_info
-    
+
     if last_warped_img is None or last_bull_info is None:
         return JSONResponse({"error": "Board not initialized"}, status_code=400)
-    
+
     try:
         # Create the overlay using your existing draw_wedges_aligned function
         bull_center, radius = last_bull_info
-        
+
         # Generate the overlay with wedges and scoring zones
         overlay_img, _, scores_order, masks_dict = draw_wedges_aligned(
             last_warped_img, bull_center, alpha=0.6
         )
-        
+
         # Add bullseye center indicator
         cv2.circle(overlay_img, (int(bull_center[0]), int(bull_center[1])), 5, (0, 255, 255), -1)
-        
+
         # Add scoring zone labels
         h, w = overlay_img.shape[:2]
         ang_step = 2 * np.pi / 20
         start_angle = -np.pi/2  # Start from top (20 wedge)
-        
+
         for i, score in enumerate(scores_order):
             angle = start_angle + i * ang_step
             x = int(bull_center[0] + (radius * 0.7) * np.cos(angle))
             y = int(bull_center[1] + (radius * 0.7) * np.sin(angle))
-            
+
             # Ensure text is within image bounds
             if 0 <= x < w and 0 <= y < h:
                 cv2.putText(
                     overlay_img, str(score), (x-10, y+5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA
                 )
-        
+
         # Convert to base64 for Flutter
         _, buffer = cv2.imencode('.png', overlay_img)
         overlay_b64 = base64.b64encode(buffer).decode('utf-8')
-        
+
         return {
             "status": "success",
             "overlay_image": base64.b64encode(buffer).decode('utf-8'),
@@ -2239,7 +2069,7 @@ def get_board_overlay_visual():
                 "scores_order": scores_order,
             }
         }
-        
+
     except Exception as e:
         print(f"Error generating overlay: {e}")
         return JSONResponse({"error": f"Failed to generate overlay: {str(e)}"}, status_code=500)
@@ -2248,81 +2078,11 @@ def get_board_overlay_visual():
 def ping():
     return {"pong": True, "timestamp": "now"}
 
-@app.post("/clear-distorted-regions")
-async def clear_distorted_regions_endpoint():
-    """Clear all distorted dart regions."""
-    global distorted_regions
-    clear_distorted_regions()
-    return {
-        "status": "success",
-        "message": "All distorted regions cleared",
-        "distorted_regions_count": 0
-    }
-
-@app.get("/distorted-regions-status")
-async def get_distorted_regions_status():
-    """Get status of distorted regions."""
-    import time
-    global distorted_regions
-    return {
-        "status": "success",
-        "distorted_regions_count": len(distorted_regions),
-        "regions": [
-            {
-                "bbox": [x1, y1, x2, y2],
-                "timestamp": timestamp,
-                "age_seconds": time.time() - timestamp
-            }
-            for x1, y1, x2, y2, timestamp in distorted_regions
-        ]
-    }
-
-@app.post("/distort-dart-region")
-async def distort_dart_region_endpoint(file: UploadFile = File(...), distortion_type: str = "blur"):
-    """Manually distort a dart region in an uploaded image."""
-    contents = await file.read()
-    npimg = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-    
-    if image is None:
-        return JSONResponse({"error": "Invalid image"}, status_code=400)
-    
-    # Detect darts first
-    detections = run_detector(image, debug=False)
-    if not detections:
-        return JSONResponse({"error": "No darts detected in image"}, status_code=404)
-    
-    # Apply distortion to all detected darts
-    distorted_image = image.copy()
-    distorted_regions_info = []
-    
-    for i, (x1, y1, x2, y2, conf, tip_x, tip_y) in enumerate(detections):
-        distorted_image = distort_dart_region(distorted_image, x1, y1, x2, y2, distortion_type)
-        add_distorted_region(x1, y1, x2, y2)
-        distorted_regions_info.append({
-            "dart_index": i,
-            "bbox": [x1, y1, x2, y2],
-            "confidence": float(conf),
-            "distortion_type": distortion_type
-        })
-    
-    # Encode distorted image
-    _, buf = cv2.imencode(".png", distorted_image)
-    distorted_image_b64 = base64.b64encode(buf).decode("utf-8")
-    
-    return {
-        "status": "success",
-        "message": f"Applied {distortion_type} distortion to {len(detections)} dart(s)",
-        "distorted_image": distorted_image_b64,
-        "distorted_regions": distorted_regions_info,
-        "total_distorted_regions": len(distorted_regions)
-    }
-
 @app.get("/healthz")
 def healthz():
     import psutil
     memory_info = psutil.virtual_memory()
-    
+
     # Get TensorFlow memory info if available
     tf_memory = "N/A"
     try:
@@ -2330,7 +2090,7 @@ def healthz():
         tf_memory = f"{tf.config.experimental.get_memory_info('CPU:0')['current'] / (1024**2):.1f} MB"
     except:
         pass
-    
+
     return {
         "ok": True,
         "memory_usage": {
@@ -2340,4 +2100,3 @@ def healthz():
             "tensorflow_memory": tf_memory
         },
         "render_status": "Memory optimized for 2GB RAM (1 CPU, 2GB)"
-    }
