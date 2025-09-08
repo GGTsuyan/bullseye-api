@@ -1,34 +1,38 @@
-applications:
-  - name: bullseye-api-v4
-    type: web
+# Render Cloud deployment configuration for Bullseye API
+# Optimized for 2GB RAM, 1 CPU plan
+
+services:
+  - type: web
+    name: bullseye-api
     env: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn bullseye_api:app --host 0.0.0.0 --port $PORT --workers 1
+    plan: starter  # 2GB RAM, 1 CPU
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements_optimized.txt
+      pip install psutil memory-profiler
+    startCommand: python bullseye_api.py
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.13
-      - key: TF_CPP_MIN_LOG_LEVEL
-        value: 2
-      - key: TF_FORCE_GPU_ALLOW_GROWTH
-        value: false
-      - key: TF_MEMORY_ALLOCATION
-        value: 0.6
-      - key: TF_CPP_VMODULE
-        value: "tensorflow=0"
-      - key: OMP_NUM_THREADS
-        value: 2
+      - key: PORT
+        value: 8000
       - key: PYTHONUNBUFFERED
-        value: "1"
-      - key: PYTHONDONTWRITEBYTECODE
-        value: "1"
-      - key: TF_ENABLE_ONEDNN_OPTS
-        value: "0"
-      - key: TF_ENABLE_MKL_NATIVE_FORMAT
-        value: "0"
-      - key: TF_ENABLE_CPU_OPTIMIZATION
-        value: "0"
-      - key: PIP_NO_CACHE_DIR
-        value: "1"
-      - key: PIP_DISABLE_PIP_VERSION_CHECK
-        value: "1"
+        value: 1
+      - key: TF_CPP_MIN_LOG_LEVEL
+        value: 3
+      - key: OMP_NUM_THREADS
+        value: 1
+      - key: TF_MEMORY_ALLOCATION
+        value: 0.5
+      - key: TF_DISABLE_MKL
+        value: 1
+      - key: TF_DISABLE_POOL_ALLOCATOR
+        value: 1
+    healthCheckPath: /healthz
+    autoDeploy: true
+    region: oregon  # Choose closest region
+    scaling:
+      minInstances: 1
+      maxInstances: 1  # Single instance for 2GB RAM
+    disk:
+      name: bullseye-storage
+      mountPath: /opt/render/project/models
+      sizeGB: 1  # Minimal storage for model files
