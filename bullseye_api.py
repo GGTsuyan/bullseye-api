@@ -291,20 +291,37 @@ def find_dart_tip(x1, y1, x2, y2, image, debug=False):
 # ===============================
 # --- Dart Detector Wrapper
 # ===============================
-def deduplicate_darts(detections, min_distance=10):
+def deduplicate_darts(detections, min_distance=15):
     """
     Merge/remove detections that are too close together (likely duplicates).
     detections: list of tuples (x1, y1, x2, y2, score, tip_x, tip_y)
     min_distance: minimum pixel distance between unique dart tips
     """
+    if not detections:
+        return []
+    
+    # Sort by confidence score (highest first)
+    sorted_detections = sorted(detections, key=lambda x: x[4], reverse=True)
+    
     filtered = []
-    for d in detections:
+    for d in sorted_detections:
         _, _, _, _, _, tx, ty = d
-        if not any(
-            ((tx - fd[5]) ** 2 + (ty - fd[6]) ** 2) ** 0.5 < min_distance
-            for fd in filtered
-        ):
+        is_duplicate = False
+        
+        for fd in filtered:
+            fd_tx, fd_ty = fd[5], fd[6]
+            distance = ((tx - fd_tx) ** 2 + (ty - fd_ty) ** 2) ** 0.5
+            
+            if distance < min_distance:
+                print(f"🔍 DEDUPLICATION: Skipping duplicate dart at distance {distance:.1f}px")
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
             filtered.append(d)
+            print(f"🔍 DEDUPLICATION: Keeping dart at ({tx}, {ty})")
+    
+    print(f"🔍 DEDUPLICATION: {len(detections)} -> {len(filtered)} darts")
     return filtered
 
 
@@ -356,7 +373,7 @@ def run_detector(image_bgr, debug=False):
 
             # Check if this dart is in a previously distorted region
             if is_dart_in_distorted_region(x1, y1, x2, y2, distorted_regions):
-                print(f"🔍 DETECTION DEBUG: Skipping detection {i} - overlaps with distorted region")
+                print(f"🔍 DISTORTION FILTER: Skipping detection {i} - overlaps with distorted region ({x1}, {y1}, {x2}, {y2})")
                 continue
 
             tip_coords = find_dart_tip(x1, y1, x2, y2, image_bgr, debug)
@@ -1277,6 +1294,9 @@ async def live_dart_detect(file: UploadFile = File(...)):
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             print(f"🎯 DART ANALYZER: Drew dart {i+1} on original frame: ({x1}, {y1}) to ({x2}, {y2}) with confidence {conf:.2f}")
     
+    # Store the original image for distortion (before any modifications)
+    original_image_for_distortion = image.copy()
+    
     if not detections:
         print("🎯 No dart detected in original frame - take another frame")
         response_data = {
@@ -1497,7 +1517,7 @@ async def live_dart_detect(file: UploadFile = File(...)):
                    (abs(orig_conf - conf) < 0.05):  # Very close confidence
                     print(f"🎯 DISTORTION: Applying distortion to confirmed dart region ({orig_x1}, {orig_y1}, {orig_x2}, {orig_y2})")
                     # Distort the dart region in the original image
-                    image = distort_dart_region(image, orig_x1, orig_y1, orig_x2, orig_y2, distortion_type="blur")
+                    original_image_for_distortion = distort_dart_region(original_image_for_distortion, orig_x1, orig_y1, orig_x2, orig_y2, distortion_type="blur")
                     # Add to distorted regions tracking
                     add_distorted_region(orig_x1, orig_y1, orig_x2, orig_y2)
                     break
@@ -1661,6 +1681,13 @@ async def live_dart_detect(file: UploadFile = File(...)):
     original_frame_b64 = base64.b64encode(buf).decode("utf-8")
     response_data["original_frame_image"] = original_frame_b64
     print(f"🎯 DART ANALYZER: Added original frame image with dart detection (size: {len(original_frame_b64)} chars)")
+    
+    # Add distorted image to show the effect of distortion
+    if len(confirmed_darts) > 0:
+        _, buf_distorted = cv2.imencode(".png", original_image_for_distortion)
+        distorted_frame_b64 = base64.b64encode(buf_distorted).decode("utf-8")
+        response_data["distorted_frame_image"] = distorted_frame_b64
+        print(f"🎯 DISTORTION: Added distorted frame image (size: {len(distorted_frame_b64)} chars)")
     
     # Add processed dartboard with dart bounding boxes for Dart Analyzer
     if processed_dartboard_b64 is not None:
