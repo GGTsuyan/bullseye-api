@@ -223,7 +223,7 @@ def run_detector(image_bgr, debug=False):
             boxes=boxes,
             scores=scores,
             max_output_size=MAX_DARTS,
-            iou_threshold=0.35,
+            iou_threshold=0.3,
             score_threshold=CONFIDENCE_THRESHOLD
         ).numpy()
 
