@@ -110,6 +110,9 @@ dart_candidates = []  # [(wx, wy, score, frame_count)]
 # Store dartboard scores for quick lookup
 last_dartboard_scores = {}  # {(wx, wy): score}
 
+# Store distorted dart regions to prevent re-detection
+distorted_regions = []  # [(x1, y1, x2, y2, timestamp)] - bounding boxes of distorted darts
+
 # ===============================
 # --- Game State Management
 # ===============================
@@ -133,6 +136,116 @@ def is_valid_board_location(wx, wy, bull_info, warp_size):
     # Check if within dartboard radius (with some margin)
     distance_from_center = ((wx - bull_center[0]) ** 2 + (wy - bull_center[1]) ** 2) ** 0.5
     return distance_from_center <= radius * 1.1  # 10% margin
+
+def distort_dart_region(image, x1, y1, x2, y2, distortion_type="blur"):
+    """
+    Distort a dart region in the image to prevent re-detection.
+    
+    Args:
+        image: Input image (BGR format)
+        x1, y1, x2, y2: Bounding box coordinates
+        distortion_type: Type of distortion ("blur", "noise", "blackout", "pixelate")
+    
+    Returns:
+        Modified image with distorted dart region
+    """
+    if image is None or image.size == 0:
+        return image
+    
+    # Ensure coordinates are within image bounds
+    h, w = image.shape[:2]
+    x1 = max(0, min(x1, w-1))
+    y1 = max(0, min(y1, h-1))
+    x2 = max(x1+1, min(x2, w))
+    y2 = max(y1+1, min(y2, h))
+    
+    # Expand the region slightly to ensure complete coverage
+    padding = 15
+    x1 = max(0, x1 - padding)
+    y1 = max(0, y1 - padding)
+    x2 = min(w, x2 + padding)
+    y2 = min(h, y2 + padding)
+    
+    # Create a copy to avoid modifying the original
+    distorted_image = image.copy()
+    region = distorted_image[y1:y2, x1:x2]
+    
+    if region.size == 0:
+        return distorted_image
+    
+    if distortion_type == "blur":
+        # Apply heavy Gaussian blur
+        blurred_region = cv2.GaussianBlur(region, (25, 25), 0)
+        distorted_image[y1:y2, x1:x2] = blurred_region
+        
+    elif distortion_type == "noise":
+        # Add random noise
+        noise = np.random.randint(0, 256, region.shape, dtype=np.uint8)
+        noisy_region = cv2.addWeighted(region, 0.2, noise, 0.8, 0)
+        distorted_image[y1:y2, x1:x2] = noisy_region
+        
+    elif distortion_type == "blackout":
+        # Fill with black
+        distorted_image[y1:y2, x1:x2] = (0, 0, 0)
+        
+    elif distortion_type == "pixelate":
+        # Pixelate the region
+        small_region = cv2.resize(region, (6, 6), interpolation=cv2.INTER_NEAREST)
+        pixelated_region = cv2.resize(small_region, (x2-x1, y2-y1), interpolation=cv2.INTER_NEAREST)
+        distorted_image[y1:y2, x1:x2] = pixelated_region
+        
+    elif distortion_type == "inpaint":
+        # Use OpenCV's inpainting to fill the region
+        mask = np.ones((y2-y1, x2-x1), dtype=np.uint8) * 255
+        inpainted_region = cv2.inpaint(region, mask, 5, cv2.INPAINT_TELEA)
+        distorted_image[y1:y2, x1:x2] = inpainted_region
+    
+    return distorted_image
+
+def is_dart_in_distorted_region(x1, y1, x2, y2, distorted_regions, threshold=50):
+    """
+    Check if a dart detection overlaps with any previously distorted region.
+    
+    Args:
+        x1, y1, x2, y2: Current dart bounding box
+        distorted_regions: List of previously distorted regions
+        threshold: Minimum overlap area to consider as duplicate
+    
+    Returns:
+        True if dart overlaps with distorted region, False otherwise
+    """
+    for dist_x1, dist_y1, dist_x2, dist_y2, _ in distorted_regions:
+        # Calculate intersection area
+        intersection_x1 = max(x1, dist_x1)
+        intersection_y1 = max(y1, dist_y1)
+        intersection_x2 = min(x2, dist_x2)
+        intersection_y2 = min(y2, dist_y2)
+        
+        if intersection_x1 < intersection_x2 and intersection_y1 < intersection_y2:
+            intersection_area = (intersection_x2 - intersection_x1) * (intersection_y2 - intersection_y1)
+            current_area = (x2 - x1) * (y2 - y1)
+            
+            # If intersection is significant, consider it a duplicate
+            if intersection_area > threshold and intersection_area > current_area * 0.3:
+                return True
+    
+    return False
+
+def add_distorted_region(x1, y1, x2, y2):
+    """Add a new distorted region to the tracking list."""
+    import time
+    global distorted_regions
+    distorted_regions.append((x1, y1, x2, y2, time.time()))
+    
+    # Keep only recent distortions (last 30 seconds)
+    current_time = time.time()
+    distorted_regions = [(x1, y1, x2, y2, timestamp) for x1, y1, x2, y2, timestamp in distorted_regions 
+                        if current_time - timestamp < 30]
+
+def clear_distorted_regions():
+    """Clear all distorted regions (useful for new game/turn)."""
+    global distorted_regions
+    distorted_regions = []
 
 # ===============================
 # --- Dart Tip Finder
@@ -240,6 +353,11 @@ def run_detector(image_bgr, debug=False):
             ymin, xmin, ymax, xmax = boxes[i]
             x1, y1 = int(xmin * w_orig), int(ymin * h_orig)
             x2, y2 = int(xmax * w_orig), int(ymax * h_orig)
+
+            # Check if this dart is in a previously distorted region
+            if is_dart_in_distorted_region(x1, y1, x2, y2, distorted_regions):
+                print(f"🔍 DETECTION DEBUG: Skipping detection {i} - overlaps with distorted region")
+                continue
 
             tip_coords = find_dart_tip(x1, y1, x2, y2, image_bgr, debug)
             if tip_coords is not None:
@@ -1010,8 +1128,12 @@ async def detect_dart_debug(file: UploadFile = File(...)):
 
 @app.post("/reset-turn")
 async def reset_turn():
-    global turn_darts, current_game
+    global turn_darts, current_game, distorted_regions
     turn_darts = []
+    
+    # Clear distorted regions when resetting turn
+    clear_distorted_regions()
+    print("🔄 Turn reset - cleared distorted regions")
     
     if current_game is not None:
         # Reset turn in game state
@@ -1025,7 +1147,8 @@ async def reset_turn():
     
     return {
         "status": "turn reset",
-        "game_state": game_state
+        "game_state": game_state,
+        "distorted_regions_cleared": True
     }
 
 @app.get("/debug-visual")
@@ -1140,6 +1263,16 @@ async def live_dart_detect(file: UploadFile = File(...)):
     
     detections = run_detector(image, debug=True)  # Enable debug for more info
     print(f"🎯 TENSORFLOW CHECK: Found {len(detections) if detections else 0} darts in original frame")
+    
+    # Apply distortion to any detected darts to prevent re-detection
+    if detections:
+        print("🎯 DISTORTION: Applying distortion to detected dart regions...")
+        for i, (x1, y1, x2, y2, conf, tip_x, tip_y) in enumerate(detections):
+            # Distort the dart region in the original image
+            image = distort_dart_region(image, x1, y1, x2, y2, distortion_type="blur")
+            # Add to distorted regions tracking
+            add_distorted_region(x1, y1, x2, y2)
+            print(f"🎯 DISTORTION: Distorted dart {i+1} region ({x1}, {y1}, {x2}, {y2})")
     
     # Always generate original frame image with dart detection for Dart Analyzer
     original_frame_with_darts = image.copy()
@@ -1568,7 +1701,7 @@ async def process_dart(dart: DartRequest):
 @app.post("/start-game")
 async def start_game(request: GameStartRequest):
     """Start a new game with specified mode and players."""
-    global dart_history, turn_darts, current_game
+    global dart_history, turn_darts, current_game, distorted_regions
     
     # Create new game instance with real GameState
     current_game = GameState(
@@ -1580,11 +1713,13 @@ async def start_game(request: GameStartRequest):
     # Reset game state
     dart_history = []
     turn_darts = []
+    clear_distorted_regions()  # Clear all distorted regions for new game
     
     return {
         "status": "success",
         "message": "Game started successfully",
-        "game_state": current_game.get_state()
+        "game_state": current_game.get_state(),
+        "distorted_regions_cleared": True
     }
 
 @app.post("/end-turn")
@@ -1678,7 +1813,10 @@ def root():
             "/current-score (GET)",
             "/board-overlay (GET)",
             "/board-overlay-visual (GET)",
-            "/debug-board (GET)"
+            "/debug-board (GET)",
+            "/clear-distorted-regions (POST)",  # 🆕 Clear distorted regions
+            "/distorted-regions-status (GET)",  # 🆕 Get distortion status
+            "/distort-dart-region (POST)"  # 🆕 Manual dart distortion
         ]
     }
 
@@ -2075,6 +2213,76 @@ def get_board_overlay_visual():
 @app.get("/ping")
 def ping():
     return {"pong": True, "timestamp": "now"}
+
+@app.post("/clear-distorted-regions")
+async def clear_distorted_regions_endpoint():
+    """Clear all distorted dart regions."""
+    global distorted_regions
+    clear_distorted_regions()
+    return {
+        "status": "success",
+        "message": "All distorted regions cleared",
+        "distorted_regions_count": 0
+    }
+
+@app.get("/distorted-regions-status")
+async def get_distorted_regions_status():
+    """Get status of distorted regions."""
+    import time
+    global distorted_regions
+    return {
+        "status": "success",
+        "distorted_regions_count": len(distorted_regions),
+        "regions": [
+            {
+                "bbox": [x1, y1, x2, y2],
+                "timestamp": timestamp,
+                "age_seconds": time.time() - timestamp
+            }
+            for x1, y1, x2, y2, timestamp in distorted_regions
+        ]
+    }
+
+@app.post("/distort-dart-region")
+async def distort_dart_region_endpoint(file: UploadFile = File(...), distortion_type: str = "blur"):
+    """Manually distort a dart region in an uploaded image."""
+    contents = await file.read()
+    npimg = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    
+    if image is None:
+        return JSONResponse({"error": "Invalid image"}, status_code=400)
+    
+    # Detect darts first
+    detections = run_detector(image, debug=False)
+    if not detections:
+        return JSONResponse({"error": "No darts detected in image"}, status_code=404)
+    
+    # Apply distortion to all detected darts
+    distorted_image = image.copy()
+    distorted_regions_info = []
+    
+    for i, (x1, y1, x2, y2, conf, tip_x, tip_y) in enumerate(detections):
+        distorted_image = distort_dart_region(distorted_image, x1, y1, x2, y2, distortion_type)
+        add_distorted_region(x1, y1, x2, y2)
+        distorted_regions_info.append({
+            "dart_index": i,
+            "bbox": [x1, y1, x2, y2],
+            "confidence": float(conf),
+            "distortion_type": distortion_type
+        })
+    
+    # Encode distorted image
+    _, buf = cv2.imencode(".png", distorted_image)
+    distorted_image_b64 = base64.b64encode(buf).decode("utf-8")
+    
+    return {
+        "status": "success",
+        "message": f"Applied {distortion_type} distortion to {len(detections)} dart(s)",
+        "distorted_image": distorted_image_b64,
+        "distorted_regions": distorted_regions_info,
+        "total_distorted_regions": len(distorted_regions)
+    }
 
 @app.get("/healthz")
 def healthz():
